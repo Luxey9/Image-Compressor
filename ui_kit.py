@@ -59,7 +59,7 @@ THEMES = {
     },
 }
 
-_current = {"name": "dark"}
+_current = {"name": "light"}
 _registry: "weakref.WeakSet" = weakref.WeakSet()
 
 

@@ -31,7 +31,7 @@ except Exception:
     HEIC_SUPPORT = False
 
 APP_NAME = "Image Compressor"
-APP_VER = "1.2.0"
+APP_VER = "1.3.0"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".image_compressor.json")
 
 BASE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff")

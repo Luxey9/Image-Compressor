@@ -12,11 +12,12 @@ echo BUILD_START %DATE% %TIME% > build_log.txt
   --output-filename=ImageCompressor.exe ^
   --company-name="Lab AP" ^
   --product-name="Image Compressor" ^
-  --file-version=1.2.0.0 ^
-  --product-version=1.2.0.0 ^
+  --file-version=1.3.0.0 ^
+  --product-version=1.3.0.0 ^
   --file-description="Kompres dan resize massal aset gambar untuk web" ^
   --include-package=pillow_heif ^
   --include-package-data=pillow_heif ^
+  --include-data-files=app.ico=app.ico ^
   --nofollow-import-to=test_core ^
   --nofollow-import-to=make_icon ^
   image_compressor.py >> build_log.txt 2>&1

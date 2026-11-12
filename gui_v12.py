@@ -1,4 +1,4 @@
-"""GUI v1.2.0 — tema gelap, panel pratinjau sebelum-sesudah, drag & drop.
+"""GUI v1.3.0 — tema cerah, panel pratinjau sebelum-sesudah, drag & drop.
 
 Layout:
   [+------------------------------------+-----------------------+
@@ -30,6 +30,17 @@ APP_NAME = "Image Compressor"
 
 PREVIEW_PX = 520   # lebar kanvas pratinjau
 PREVIEW_PY = 340   # tinggi kanvas pratinjau
+
+
+def _ico_path() -> str | None:
+    """Lokasi app.ico: di folder skrip saat source, atau dalam bundle Nuitka."""
+    import sys
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(base, "app.ico")
+    return p if os.path.exists(p) else None
 
 
 # --------------------------------------------------------------------------- #
@@ -244,7 +255,7 @@ class ComparePanel(tk.Canvas):
                 px = cx - bx / 2 + cut / 2
                 self.create_image(px, cy, image=crop, anchor="center")
 
-        # bingkai tipis supaya tepi gambar jelas di atas latar gelap
+        # bingkai tipis supaya tepi gambar jelas di atas latar canvas
         if ax < w or ay < h:
             self.create_rectangle(cx - bx / 2, cy - by / 2, cx + bx / 2, cy + by / 2,
                                   outline="", width=0)
@@ -345,6 +356,12 @@ class GUI:
         ui.init(root)
         ui.dark_titlebar(root)
         root.title(f"{APP_NAME} v{core.APP_VER}")
+        ic = _ico_path()
+        if ic:
+            try:
+                root.iconbitmap(ic)
+            except tk.TclError:
+                pass
         root.minsize(1180, 820)
         root.configure(bg=ui.theme()["bg"])
         self._build()
@@ -371,10 +388,8 @@ class GUI:
 
         box = tk.Frame(hdr, bg=p["bg"])
         box.grid(row=0, column=0, sticky="w")
-        ui.Btn(box, "IC", variant="primary", width=34, height=34, radius=9,
-               fontsize=11, command=self.about).pack(side="left")
         title = tk.Frame(box, bg=p["bg"])
-        title.pack(side="left", padx=(12, 0))
+        title.pack(side="left")
         ui.Label(title, APP_NAME, size=13, bold=True, bg=p["bg"]).pack(anchor="w")
         ui.Label(title, "Kompres & resize massal untuk aset web",
                  size=9, color=p["text_dim"], bg=p["bg"]).pack(anchor="w")
