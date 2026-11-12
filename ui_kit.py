@@ -35,27 +35,37 @@ THEMES = {
         "track": "#3a3a3e",
         "hover": "#333336",
         "select": "#094771",
+        "grad_top": "#2f8fff",
+        "grad_bot": "#0a6ae0",
+        "grad_top_hover": "#4da2ff",
+        "grad_bot_hover": "#1f7dee",
+        "gloss": "#ffffff",
     },
     "light": {
-        "bg": "#f3f3f3",
+        "bg": "#eef3f8",
         "panel": "#ffffff",
-        "panel2": "#f7f7f7",
+        "panel2": "#f4f8fc",
         "input": "#ffffff",
-        "border": "#d6d6d6",
-        "border_soft": "#e4e4e4",
-        "text": "#1b1b1b",
-        "text_dim": "#5f5f66",
-        "accent": "#0067c0",
-        "accent_hover": "#0a7ad6",
-        "accent_press": "#00529a",
+        "border": "#c8d8ea",
+        "border_soft": "#dde8f4",
+        "text": "#13293d",
+        "text_dim": "#5d7080",
+        "accent": "#0047ab",
+        "accent_hover": "#0a5cce",
+        "accent_press": "#003580",
         "accent_text": "#ffffff",
         "ok": "#1a7f37",
         "warn": "#9a6700",
         "err": "#cf222e",
         "chip": "#ffffff",
-        "track": "#d9d9de",
-        "hover": "#ececec",
-        "select": "#cfe4fb",
+        "track": "#d5e2f0",
+        "hover": "#eaf1f9",
+        "select": "#c9def7",
+        "grad_top": "#0a5cce",
+        "grad_bot": "#003e9c",
+        "grad_top_hover": "#1a6fe0",
+        "grad_bot_hover": "#0047ab",
+        "gloss": "#ffffff",
     },
 }
 
@@ -153,7 +163,7 @@ class Card2(Card):
 
 
 class Divider(tk.Frame):
-    """Garis pemisah tipis, tinggi 1px."""
+    """Garis pemisah tipis, tinggi 1px, aksen kebiruan."""
 
     def __init__(self, master, **kw):
         super().__init__(master, height=1, **kw)
@@ -196,6 +206,22 @@ def mix(c1: str, c2: str, t: float) -> str:
     return "#{:02x}{:02x}{:02x}".format(
         *(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
     )
+
+
+def _grad_lines(x0: float, y0: float, x1: float, y1: float,
+                top: str, bot: str, steps: int = 24) -> list[tuple]:
+    """Garis-garis horizontal tipis membentuk gradien vertikal.
+
+    Tk tidak punya gradien native, jadi kita tumpuk garis 1px.
+    """
+    out = []
+    h = max(1.0, y1 - y0)
+    for i in range(steps):
+        t = i / (steps - 1)
+        yy = y0 + h * i / steps
+        out.append((x0, yy, x1, yy, mix(top, bot, t)))
+    return out
+
 
 
 # --------------------------------------------------------------------------- #
@@ -408,11 +434,11 @@ class Btn(_Base):
                 p["accent_hover"] if self._hover else p["accent"]
             )
             fg = p["accent_text"]
-            border = base
+            border = mix(base, "#000000", 0.18)
         elif self._variant == "ghost":
             base = p["hover"] if (self._hover or self._press) else self._bg()
             fg = p["text_dim"] if not self._hover else p["text"]
-            border = self._bg()
+            border = p["border_soft"]
         else:
             base = p["panel2"] if not self._hover else mix(p["panel2"], p["text"], 0.10)
             if self._press:
@@ -434,6 +460,27 @@ class Btn(_Base):
         base, fg, border = self._colors()
         pts = rounded_points(1, 1, w - 1, h - 1, self._radius)
         self.create_polygon(pts, fill=base, outline=border, width=1)
+
+        # efek hidup: gradien + kilau untuk tombol primary
+        if self._variant == "primary" and not self._disabled:
+            p = theme()
+            top = p["grad_top_hover"] if self._hover else p["grad_top"]
+            bot = p["grad_bot_hover"] if self._hover else p["grad_bot"]
+            if self._press:
+                top = bot = p["accent_press"]
+            inset = 2
+            pts_i = rounded_points(1 + inset, 1 + inset, w - 1 - inset, h - 1 - inset,
+                                   max(2, self._radius - 2))
+            self.create_polygon(pts_i, fill=base, outline="")
+            for x0, y0, x1, y1, c in _grad_lines(1 + inset, 1 + inset,
+                                                  w - 1 - inset, h - 1 - inset,
+                                                  top, bot):
+                self.create_line(x0, y0, x1, y1, fill=c, width=1)
+            # kilau lembut di bagian atas
+            gloss_h = max(4, (h - 2 * inset) * 0.38)
+            pts_g = rounded_points(1 + inset, 1 + inset, w - 1 - inset,
+                                   1 + inset + gloss_h, max(2, self._radius - 2))
+            self.create_polygon(pts_g, fill=p["gloss"], outline="", stipple="gray50")
 
         cx = w / 2
         if self._icon:
@@ -467,6 +514,15 @@ class Btn(_Base):
             self.create_rectangle(x, cy - 2, x + 13, cy + 5, outline=color, width=1.4)
         elif kind == "check":
             self.create_line(x + 1, cy, x + 5, cy + 4, x + 13, cy - 5, fill=color, width=2)
+        elif kind == "image":
+            # bingkai gambar + bukit kecil + matahari
+            self.create_rectangle(x, cy - 6, x + 13, cy + 6, outline=color, width=1.4)
+            self.create_polygon(x + 1.5, cy + 5, x + 5.5, cy - 0.5, x + 8.5, cy + 5,
+                                fill=color, outline=color)
+            self.create_polygon(x + 5.5, cy + 5, x + 9, cy + 1.5, x + 12.5, cy + 5,
+                                fill=color, outline=color)
+            self.create_oval(x + 8.5, cy - 5, x + 11.5, cy - 2,
+                             outline=color, width=1.2)
         elif kind == "x":
             self.create_line(x + 2, cy - 5, x + 12, cy + 5, fill=color, width=1.8)
             self.create_line(x + 12, cy - 5, x + 2, cy + 5, fill=color, width=1.8)
@@ -755,9 +811,12 @@ class Section(_Base):
         p = theme()
         h = self.winfo_height() or 24
         cy = h / 2
-        self.create_oval(1, cy - 8, 17, cy + 8, fill=p["panel2"], outline=p["border"])
-        self.create_text(9, cy, text=self._num, fill=p["text_dim"], font=font(8, True))
-        self.create_text(25, cy, text=self._title.upper(), fill=p["text_dim"],
+        self.create_oval(1, cy - 8, 17, cy + 8, fill=p["grad_top"], outline=p["grad_bot"])
+        for x0, y0, x1, y1, c in _grad_lines(1, cy - 8, 17, cy + 8,
+                                              p["grad_top"], p["grad_bot"]):
+            self.create_line(x0, y0, x1, y1, fill=c, width=1)
+        self.create_text(9, cy, text=self._num, fill="#ffffff", font=font(8, True))
+        self.create_text(25, cy, text=self._title.upper(), fill=p["text"],
                          anchor="w", font=font(9, True))
 
 
@@ -779,8 +838,12 @@ class Progress(_Base):
         cy = h / 2
         self.create_line(0, cy, w, cy, fill=p["track"], width=5, capstyle="round")
         if self._frac > 0:
-            self.create_line(0, cy, max(6, w * self._frac), cy, fill=p["accent"],
-                             width=5, capstyle="round")
+            xend = max(6, w * self._frac)
+            self.create_line(0, cy, xend, cy, fill=p["grad_top"], width=5,
+                             capstyle="round")
+            for x0, y0, x1, y1, c in _grad_lines(0, cy - 2, xend, cy + 2,
+                                                  p["grad_top"], p["grad_bot"]):
+                self.create_line(x0, y0, x1, y1, fill=c, width=1)
 
 
 class Badge(_Base):

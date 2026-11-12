@@ -31,7 +31,7 @@ except Exception:
     HEIC_SUPPORT = False
 
 APP_NAME = "Image Compressor"
-APP_VER = "1.3.0"
+APP_VER = "1.3.6"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".image_compressor.json")
 
 BASE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff")
@@ -321,20 +321,32 @@ def build_tasks(
     skip_bigger: bool,
     delete_orig: bool,
 ) -> list[dict]:
-    return [
-        {
+    tasks = []
+    for f in files:
+        if in_place:
+            dst = build_dest(f, src_root or os.path.dirname(f), out_dir, fmt, True)
+            label = os.path.basename(f)
+        elif src_root:
+            dst = build_dest(f, src_root, out_dir, fmt, False)
+            label = os.path.relpath(f, src_root)
+        else:
+            # Mode "file terpilih": file bisa datang dari banyak folder, jadi
+            # hasilnya ditulis datar ke out_dir dengan nama aslinya.
+            stem, _ = os.path.splitext(os.path.basename(f))
+            dst = os.path.join(out_dir, stem + FMT_EXT[fmt])
+            label = os.path.basename(f)
+        tasks.append({
             "src": f,
-            "dst": build_dest(f, src_root, out_dir, fmt, in_place),
+            "dst": dst,
             "tmp_dir": out_dir,
-            "label": os.path.relpath(f, src_root),
+            "label": label,
             "box": box,
             "quality": quality,
             "fmt": fmt,
             "skip_bigger": skip_bigger,
             "delete_orig": delete_orig,
-        }
-        for f in files
-    ]
+        })
+    return tasks
 
 
 class App:
@@ -349,8 +361,12 @@ class App:
         root.minsize(720, 620)
 
         cfg = self.load_config()
-        self.var_in = tk.StringVar(value=preset_dir or cfg.get("input", ""))
-        self.var_out = tk.StringVar(value=cfg.get("output", ""))
+        # Folder sumber SELALU kosong saat app dibuka. Nilainya tidak pernah
+        # dipulihkan dari config supaya user memilih sendiri tiap sesi.
+        self.var_in = tk.StringVar(value=preset_dir or "")
+        # Folder tujuan juga KOSONG saat dibuka: user memilih tiap sesi, baik
+        # 'Timpa di tempat' maupun 'Folder lain'. Tidak ada rujukan tersimpan.
+        self.var_out = tk.StringVar(value="")
         self.var_mode = tk.StringVar(value=cfg.get("mode", "own"))
         self.var_recursive = tk.BooleanVar(value=cfg.get("recursive", True))
         self.var_skip_bigger = tk.BooleanVar(value=cfg.get("skip_bigger", True))
@@ -363,6 +379,9 @@ class App:
 
         self.var_status = tk.StringVar(value="Siap.")
         self.var_count = tk.StringVar(value="0 / 0")
+        # daftar file spesifik dari 'Pilih File' / drag & drop file
+        self.var_files: list[str] = []
+        self.lbl_files_var = tk.StringVar(value="")
 
         # pratinjau sebelum-sesudah
         self.prev_path: str | None = None
@@ -399,9 +418,9 @@ class App:
             return {}
 
     def save_config(self):
+        # "input" dan "output" sengaja TIDAK disimpan: kedua kolom folder
+        # harus kosong tiap buka, user memilih sendiri.
         data = {
-            "input": self.var_in.get(),
-            "output": self.var_out.get(),
             "mode": self.var_mode.get(),
             "recursive": self.var_recursive.get(),
             "skip_bigger": self.var_skip_bigger.get(),
@@ -566,9 +585,17 @@ class App:
     def start(self):
         if self.worker and self.worker.is_alive():
             return
+        # Mode file: daftar file spesifik (dari 'Pilih File' atau drag & drop).
+        # Kalau tidak ada, baru pakai folder sumber.
+        files_mode = [f for f in (self.var_files or []) if os.path.isfile(f)]
         in_dir = self.var_in.get().strip()
+
+        if files_mode:
+            return self._start_files(files_mode)
+
         if not in_dir or not os.path.isdir(in_dir):
-            messagebox.showerror(APP_NAME, "Folder sumber belum dipilih / tidak ditemukan.")
+            messagebox.showerror(APP_NAME, "Folder sumber belum dipilih / tidak ditemukan.\n\n"
+                                           "Pilih folder sumber, atau tekan 'Pilih File'.")
             return
         in_place = self.var_mode.get() == "inplace"
         out_dir = in_dir if in_place else self.var_out.get().strip()
@@ -607,22 +634,117 @@ class App:
         self.worker = threading.Thread(target=self.run_job, args=(opts,), daemon=True)
         self.worker.start()
 
+    def _start_files(self, files: list[str]) -> None:
+        """Kompres daftar file spesifik (bukan seluruh isi folder).
+
+        Tujuan: mode 'inplace' = timpa di samping file asal; mode 'own' =
+        tulis ke folder tujuan dengan nama yang sama seperti aslinya
+        (tanpa struktur folder, karena file bisa datang dari mana saja).
+        """
+        in_place = self.var_mode.get() == "inplace"
+        out_dir = ""
+        if not in_place:
+            out_dir = self.var_out.get().strip()
+            if not out_dir:
+                messagebox.showerror(APP_NAME, "Folder tujuan belum dipilih.\n\n"
+                                               "Pilih folder tujuan, atau ubah ke mode 'Timpa di tempat'.")
+                return
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, f"Tidak bisa membuat folder tujuan:\n{exc}")
+                return
+
+        opts = {
+            "files": list(files),
+            "in_dir": "",
+            "out_dir": out_dir,
+            "in_place": in_place,
+            "recursive": False,
+            "box": int(float(self.var_width.get() or 0)),
+            "quality": int(float(self.var_quality.get())),
+            "fmt": LABEL_FMT.get(self.var_fmt.get(), "JPEG"),
+            "skip_bigger": self.var_skip_bigger.get(),
+            "delete_orig": self.var_delete_orig.get(),
+            "jobs": int(float(self.var_jobs.get() or 0)),
+            "open_after": self.var_open_after.get(),
+        }
+        self.cancel.clear()
+        self.save_config()
+        self.worker = threading.Thread(target=self.run_job, args=(opts,), daemon=True)
+        self.worker.start()
+
+    def pick_files(self):
+        """Pilih satu atau beberapa file gambar lewat dialog."""
+        f = filedialog.askopenfilenames(
+            title="Pilih file gambar (bisa banyak)",
+            filetypes=[
+                ("Gambar", "*.jpg *.jpeg *.png *.webp *.gif *.bmp *.tif *.tiff "
+                           "*.heic *.heif"),
+                ("Semua file", "*.*"),
+            ],
+        )
+        if not f:
+            return
+        got = [os.path.normpath(p) for p in f]
+
+        # Buang yang tidak didukung, laporkan
+        ok = [p for p in got if p.lower().endswith(EXTS)]
+        bad = [p for p in got if p not in ok]
+        if not ok:
+            messagebox.showwarning(APP_NAME, "Tidak ada file gambar yang didukung di pilihan itu.")
+            return
+        if bad:
+            self.log(f"[!] {len(bad)} file dilewati (bukan gambar didukung).")
+
+        self.var_files = ok
+        # Kalau semua file dari satu folder yang sama, isi juga folder sumber
+        # supaya konteks pratinjau & tombol jelas.
+        dirs = {os.path.dirname(p) for p in ok}
+        if len(dirs) == 1:
+            self.var_in.set(dirs.pop())
+        self.refresh_files()
+        self.preview_source(max(ok, key=os.path.getsize))
+        self.log(f"[i] {len(ok)} file dipilih siap dikompres.")
+
+    def clear_files(self):
+        self.var_files = []
+        self.refresh_files()
+
+    def refresh_files(self):
+        """Beri tahu GUI jumlah file terpilih (label + tombol bersihkan)."""
+        ui = getattr(self, "ui", None)
+        if ui is not None and hasattr(ui, "show_file_selection"):
+            ui.show_file_selection(list(self.var_files))
+
     def stop(self):
         self.cancel.set()
         self.var_status.set("Menghentikan…")
 
     def run_job(self, o: dict):
-        try:
-            files = iter_sources(o["in_dir"], o["recursive"])
-        except Exception as exc:
-            self.log(f"[ERR] Gagal membaca folder: {exc}")
-            self.q.put(("done", None))
-            return
+        files_mode = o.get("files")
+        if files_mode:
+            files = [f for f in files_mode if os.path.isfile(f)]
+            if len(files) != len(files_mode):
+                self.log(f"[!] {len(files_mode) - len(files)} file hilang/tidak ditemukan, dilewati.")
+            mode_txt = "File terpilih"
+        else:
+            try:
+                files = iter_sources(o["in_dir"], o["recursive"])
+            except Exception as exc:
+                self.log(f"[ERR] Gagal membaca folder: {exc}")
+                self.q.put(("done", None))
+                return
+            mode_txt = "Folder sumber"
 
         total = len(files)
         jobs = int(o.get("jobs") or 0) or cpu_default()
-        self.log(f"Folder sumber : {o['in_dir']}")
-        self.log(f"Folder tujuan : {o['out_dir']}" + ("  (in-place)" if o["in_place"] else ""))
+        if files_mode:
+            self.log(f"{mode_txt} : {total} file")
+        else:
+            self.log(f"{mode_txt} : {o['in_dir']}")
+        self.log(f"Folder tujuan : {o['out_dir'] or '(di samping file asal)'}"
+                 + ("  (in-place)" if o["in_place"] else ""))
         self.log(f"Format        : {o['fmt']}   Lebar maks: {o['box'] or 'tanpa resize'}   "
                  f"Kualitas: {o['quality']}")
         self.log(f"Paralel       : {jobs} worker" + (" (berurutan)" if jobs <= 1 else ""))
@@ -681,7 +803,11 @@ class App:
                 self.log(f"Ruang dihemat : {(sum_before - sum_after) / sum_before * 100:.1f}%")
         self.q.put(("status", ("Dihentikan — " if cancelled else "Selesai — ")
                     + f"{ok} file diproses."))
-        self.last_out_dir = o["in_dir"] if o["in_place"] else o["out_dir"]
+        if files_mode:
+            self.last_out_dir = (os.path.dirname(files[0]) if o["in_place"]
+                                 else o["out_dir"])
+        else:
+            self.last_out_dir = o["in_dir"] if o["in_place"] else o["out_dir"]
         if o.get("open_after") and self.last_out_dir and ok:
             self.q.put(("log", f"[i] Membuka {self.last_out_dir}"))
             try:
