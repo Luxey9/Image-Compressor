@@ -436,9 +436,8 @@ class App:
             name = os.path.relpath(src, o["in_dir"])
             self.q.put(("progress", (idx - 1, total, name)))
             dst = build_dest(src, o["in_dir"], o["out_dir"], o["fmt"], o["in_place"])
-            tmp = dst + ".~ic.tmp"
+            tmp = os.path.join(o["out_dir"], f".~ic-{idx}.tmp")
             try:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
                 r = compress_one(src, tmp, o["box"], o["quality"], o["fmt"])
                 if o["skip_bigger"] and r["new"] >= r["orig"] and os.path.abspath(dst) != os.path.abspath(src):
                     os.remove(tmp)
@@ -446,6 +445,7 @@ class App:
                     self.log(f"[SKIP] {name}  ({human(r['orig'])} -> {human(r['new'])}, tidak lebih kecil)")
                     continue
 
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
                 os.replace(tmp, dst)
                 ok += 1
                 sum_before += r["orig"]
@@ -602,9 +602,8 @@ def run_headless(src_dir: str, o: dict) -> int:
     for idx, src in enumerate(files, 1):
         name = os.path.relpath(src, src_dir)
         dst = build_dest(src, src_dir, out_dir, fmt, in_place)
-        tmp = dst + ".~ic.tmp"
+        tmp = os.path.join(out_dir, f".~ic-{idx}.tmp")
         try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
             r = compress_one(src, tmp, o["box"], o["quality"], fmt)
             if o["skip_bigger"] and r["new"] >= r["orig"] and os.path.abspath(dst) != os.path.abspath(src):
                 os.remove(tmp)
@@ -613,6 +612,7 @@ def run_headless(src_dir: str, o: dict) -> int:
                     "tidak lebih kecil)")
                 continue
 
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
             os.replace(tmp, dst)
             ok += 1
             sum_before += r["orig"]
