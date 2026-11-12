@@ -10,12 +10,17 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import sys
+import tempfile
 import threading
+import time
 import tkinter as tk
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageTk
 
 try:
     from pillow_heif import register_heif_opener
@@ -26,7 +31,7 @@ except Exception:
     HEIC_SUPPORT = False
 
 APP_NAME = "Image Compressor"
-APP_VER = "1.0.0"
+APP_VER = "1.1.0"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".image_compressor.json")
 
 BASE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff")
@@ -41,6 +46,9 @@ FMT_LABEL = {
 }
 LABEL_FMT = {v: k for k, v in FMT_LABEL.items()}
 
+PREVIEW_PX = 300  # lebar panel pratinjau (px)
+PREVIEW_PY = 200  # tinggi panel pratinjau (px)
+
 
 def human(n: float) -> str:
     n = float(n)
@@ -49,6 +57,14 @@ def human(n: float) -> str:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024.0
     return f"{n:.1f} GB"
+
+
+def pct_text(orig: float, new: float) -> str:
+    """Keterangan hemat/membesar yang tidak menyesatkan tandanya."""
+    if not orig:
+        return ""
+    d = (orig - new) / orig * 100.0
+    return f"hemat {d:.0f}%" if d >= 0 else f"membesar {abs(d):.0f}%"
 
 
 def iter_sources(input_dir: str, recursive: bool):
@@ -128,6 +144,199 @@ def compress_one(src: str, tmp: str, box: int, quality: int, fmt: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Eksekusi batch — banyak file sekaligus (thread pool; Pillow lepas GIL
+# waktu encode/decode, jadi paralel di sini nyata, bukan cuma antre)
+# --------------------------------------------------------------------------- #
+
+
+def avail_ram_mb() -> int | None:
+    """RAM yang masih bebas (MB). Dipakai buat membatasi jumlah worker."""
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        st = MEMORYSTATUSEX()
+        st.dwLength = ctypes.sizeof(st)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return int(st.ullAvailPhys // (1024 * 1024))
+    except Exception:
+        pass
+    return None
+
+
+def cpu_default() -> int:
+    """Jumlah worker paralel.
+
+    Hasil ukur: thread jauh lebih untung daripada proses (Pillow melepas GIL
+    waktu encode/decode), dan makin banyak worker makin cepat sampai ~jumlah
+    core. Tapi tiap worker memegang satu gambar penuh di memori, jadi jumlahnya
+    dibatasi juga oleh RAM yang tersedia.
+    """
+    cores = os.cpu_count() or 1
+    ram = avail_ram_mb()
+    if ram:
+        by_ram = max(2, ram // 300)  # ~300 MB per worker
+        return max(1, min(cores, 16, by_ram))
+    return max(1, min(cores, 8))
+
+
+def make_tmp(dst_dir: str) -> str:
+    """Nama file temp unik — aman walau banyak worker menulis bersamaan."""
+    return os.path.join(dst_dir, f".~ic-{uuid.uuid4().hex[:10]}.tmp")
+
+
+def compress_task(t: dict) -> dict:
+    """Kerjakan SATU file. Top-level function supaya aman dipakai dari pool.
+
+    Return dict: status ok/skip/error + angka sebelum-sesudah + keterangan.
+    """
+    src, dst = t["src"], t["dst"]
+    label = t.get("label") or os.path.basename(src)
+    tmp_dir = t.get("tmp_dir") or os.path.dirname(dst) or "."
+    try:
+        tmp = make_tmp(tmp_dir)
+        r = compress_one(src, tmp, t["box"], t["quality"], t["fmt"])
+
+        if (
+            t["skip_bigger"]
+            and r["new"] >= r["orig"]
+            and os.path.abspath(dst) != os.path.abspath(src)
+        ):
+            os.remove(tmp)
+            return {
+                "status": "skip",
+                "src": src,
+                "dst": dst,
+                "label": label,
+                "orig": r["orig"],
+                "new": r["new"],
+                "reason": "hasil tidak lebih kecil",
+            }
+
+        # folder bersarang baru dibuat di sini — file yang di-SKIP tidak
+        # meninggalkan folder kosong di output
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.replace(tmp, dst)
+        deletes = False
+        if t["delete_orig"] and os.path.abspath(dst) != os.path.abspath(src):
+            try:
+                os.remove(src)
+                deletes = True
+            except OSError:
+                pass
+        return {
+            "status": "ok",
+            "src": src,
+            "dst": dst,
+            "label": label,
+            "orig": r["orig"],
+            "new": r["new"],
+            "before": r["before"],
+            "after": r["after"],
+            "deleted_orig": deletes,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "src": src,
+            "dst": dst,
+            "label": label,
+            "error": str(exc),
+        }
+
+
+def run_tasks(tasks: list[dict], jobs: int = 0, cancel=None):
+    """Jalankan semua task, hasilnya di-`yield` begitu selesai (urut apa saja).
+
+    `cancel` = threading.Event (opsional). Begitu diset, hasil baru berhenti
+    di-`yield` dan task yang belum jalan dibatalkan — file yang sedang
+    diproses tetap diselesaikan supaya tidak ada file setengah jadi.
+    """
+    jobs = int(jobs) or cpu_default()
+    if jobs <= 1 or len(tasks) <= 1:
+        for t in tasks:
+            if cancel is not None and cancel.is_set():
+                return
+            yield compress_task(t)
+        return
+
+    ex = ThreadPoolExecutor(max_workers=jobs)
+    futures = [ex.submit(compress_task, t) for t in tasks]
+    try:
+        for fut in as_completed(futures):
+            if cancel is not None and cancel.is_set():
+                break
+            yield fut.result()
+    finally:
+        # Task yang belum jalan dibatalkan; yang SEDANG jalan ditunggu selesai
+        # supaya tidak ada file yang ditulis setengah. Sisa temp dibersihkan
+        # di pemanggil lewat drop_leftover_tmp().
+        for f in futures:
+            f.cancel()
+        for f in futures:
+            if not f.cancelled():
+                try:
+                    f.result(timeout=300)
+                except Exception:
+                    pass
+        ex.shutdown(wait=True, cancel_futures=True)
+
+
+def drop_leftover_tmp(dirs: list[str]):
+    """Hapus sisa file temp dari proses yang dihentikan."""
+    for d in dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            if n.startswith(".~ic-") and n.endswith(".tmp"):
+                try:
+                    os.remove(os.path.join(d, n))
+                except OSError:
+                    pass
+
+
+def build_tasks(
+    files: list[str],
+    src_root: str,
+    out_dir: str,
+    fmt: str,
+    in_place: bool,
+    box: int,
+    quality: int,
+    skip_bigger: bool,
+    delete_orig: bool,
+) -> list[dict]:
+    return [
+        {
+            "src": f,
+            "dst": build_dest(f, src_root, out_dir, fmt, in_place),
+            "tmp_dir": out_dir,
+            "label": os.path.relpath(f, src_root),
+            "box": box,
+            "quality": quality,
+            "fmt": fmt,
+            "skip_bigger": skip_bigger,
+            "delete_orig": delete_orig,
+        }
+        for f in files
+    ]
+
+
 class App:
     def __init__(self, root: tk.Tk, preset_dir: str | None = None):
         self.root = root
@@ -150,13 +359,28 @@ class App:
         self.var_width = tk.IntVar(value=cfg.get("width", 1920))
         self.var_quality = tk.IntVar(value=cfg.get("quality", 85))
         self.var_fmt = tk.StringVar(value=FMT_LABEL.get(cfg.get("fmt", "JPEG"), FMT_LABEL["JPEG"]))
+        self.var_jobs = tk.IntVar(value=cfg.get("jobs", 0))
 
         self.var_status = tk.StringVar(value="Siap.")
         self.var_count = tk.StringVar(value="0 / 0")
 
+        # pratinjau sebelum-sesudah
+        self.prev_path: str | None = None
+        self.prev_busy = False
+        self.prev_after_id = None
+        self.ph_before = self.ph_after = None
+        self.var_prev_info = tk.StringVar(value="Belum ada contoh gambar.")
+        self.var_prev_b = tk.StringVar(value="")
+        self.var_prev_a = tk.StringVar(value="")
+
         self._build_ui()
         self.sync_mode()
         self.update_quality_label()
+        self.update_jobs_label()
+        self.var_width.trace_add("write", lambda *_: self.schedule_preview())
+        self.var_quality.trace_add("write", lambda *_: self.schedule_preview())
+        self.var_fmt.trace_add("write", lambda *_: self.schedule_preview())
+        self.var_jobs.trace_add("write", lambda *_: self.update_jobs_label())
         self.root.after(120, self.pump)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -180,6 +404,7 @@ class App:
             "width": self.var_width.get(),
             "quality": self.var_quality.get(),
             "fmt": LABEL_FMT.get(self.var_fmt.get(), "JPEG"),
+            "jobs": int(float(self.var_jobs.get() or 0)),
         }
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
@@ -249,6 +474,7 @@ class App:
         combo = ttk.Combobox(f_set, textvariable=self.var_fmt, state="readonly",
                              values=list(FMT_LABEL.values()), width=44)
         combo.grid(row=0, column=3, sticky="ew", padx=(6, 8), pady=(8, 4))
+        combo.bind("<<ComboboxSelected>>", lambda _e: self.schedule_preview())
 
         ttk.Label(f_set, text="Kualitas (JPEG/WebP)").grid(row=1, column=0, sticky="w", padx=8, pady=4)
         qrow = ttk.Frame(f_set)
@@ -262,7 +488,7 @@ class App:
         self.lbl_q.grid(row=0, column=1, sticky="w", padx=8)
 
         opts = ttk.Frame(f_set)
-        opts.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(2, 8))
+        opts.grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(2, 8))
         ttk.Checkbutton(opts, text="Lewati jika hasil tidak lebih kecil",
                         variable=self.var_skip_bigger).grid(row=0, column=0, sticky="w", padx=2)
         ttk.Checkbutton(opts, text="Hapus file asli setelah konversi format",
@@ -270,11 +496,19 @@ class App:
         ttk.Checkbutton(opts, text="Buka folder hasil setelah selesai",
                         variable=self.var_open_after).grid(row=2, column=0, sticky="w", padx=2)
 
+        ttk.Label(f_set, text="Worker paralel (0 = otomatis)").grid(
+            row=2, column=0, sticky="w", padx=8, pady=4)
+        ttk.Spinbox(f_set, from_=0, to=64, increment=1, width=8,
+                    textvariable=self.var_jobs, command=self.update_jobs_label).grid(
+            row=2, column=1, sticky="w", padx=6, pady=4)
+        self.lbl_jobs = ttk.Label(f_set, text="", foreground="#666")
+        self.lbl_jobs.grid(row=2, column=2, columnspan=2, sticky="w", padx=(18, 8), pady=4)
+
         # Aksi + progress
         f_run = ttk.Frame(outer)
         f_run.grid(row=5, column=0, sticky="nsew", **pad)
         f_run.columnconfigure(0, weight=1)
-        f_run.rowconfigure(3, weight=1)
+        f_run.rowconfigure(4, weight=1)
 
         bar = ttk.Frame(f_run)
         bar.grid(row=0, column=0, sticky="ew")
@@ -289,11 +523,37 @@ class App:
         self.pb.grid(row=1, column=0, sticky="ew", pady=(8, 2))
         ttk.Label(f_run, textvariable=self.var_status, foreground="#333").grid(row=2, column=0, sticky="w")
 
+        # Pratinjau sebelum-sesudah
+        f_prev = ttk.LabelFrame(f_run, text="Pratinjau sebelum-sesudah  ·  contoh 1 gambar")
+        f_prev.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        f_prev.columnconfigure(0, weight=1)
+        f_prev.columnconfigure(1, weight=1)
+
+        hdr = ttk.Frame(f_prev)
+        hdr.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
+        ttk.Button(hdr, text="Ambil contoh dari folder sumber",
+                   command=self.pick_preview).grid(row=0, column=0, sticky="w")
+        ttk.Button(hdr, text="Pilih file…", command=self.pick_preview_file).grid(
+            row=0, column=1, sticky="w", padx=6)
+        ttk.Label(hdr, textvariable=self.var_prev_info, foreground="#666").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        self.lbl_prev_b = tk.Label(f_prev, width=PREVIEW_PX, height=PREVIEW_PY,
+                                   background="#f4f4f4", relief="solid", borderwidth=1)
+        self.lbl_prev_b.grid(row=1, column=0, padx=(8, 4), pady=6)
+        self.lbl_prev_a = tk.Label(f_prev, width=PREVIEW_PX, height=PREVIEW_PY,
+                                   background="#f4f4f4", relief="solid", borderwidth=1)
+        self.lbl_prev_a.grid(row=1, column=1, padx=(4, 8), pady=6)
+        ttk.Label(f_prev, textvariable=self.var_prev_b, anchor="center").grid(
+            row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ttk.Label(f_prev, textvariable=self.var_prev_a, anchor="center").grid(
+            row=2, column=1, sticky="ew", padx=8, pady=(0, 8))
+
         logf = ttk.LabelFrame(f_run, text="Log")
-        logf.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        logf.grid(row=4, column=0, sticky="nsew", pady=(8, 0))
         logf.columnconfigure(0, weight=1)
         logf.rowconfigure(0, weight=1)
-        self.txt = tk.Text(logf, height=10, wrap="none", font=("Consolas", 9),
+        self.txt = tk.Text(logf, height=7, wrap="none", font=("Consolas", 9),
                            background="#fbfbfb", relief="flat")
         self.txt.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
         sb = ttk.Scrollbar(logf, orient="vertical", command=self.txt.yview)
@@ -311,6 +571,124 @@ class App:
         q = int(float(self.var_quality.get()))
         note = "" if f in ("JPEG", "WEBP") else " (PNG lossless)"
         self.lbl_q.configure(text=f"nilai: {q}{note}")
+        self.schedule_preview()
+
+    def update_jobs_label(self):
+        if not hasattr(self, "lbl_jobs"):
+            return
+        n = int(float(self.var_jobs.get() or 0))
+        cores = os.cpu_count() or 1
+        self.lbl_jobs.configure(
+            text=(f"→ dipakai: {n} worker" if n > 1
+                  else f"→ otomatis: {cpu_default()} worker dari {cores} core")
+        )
+
+    # ---------- pratinjau sebelum-sesudah ----------
+    def preview_source(self, path: str):
+        """Pasang satu gambar sebagai contoh pratinjau (dipanggil juga dari main())."""
+        p = os.path.abspath(path)
+        if not os.path.isfile(p):
+            return
+        self.prev_path = p
+        self.var_prev_info.set(f"Contoh: {os.path.basename(p)}")
+        self.schedule_preview(50)
+
+    def pick_preview(self):
+        """Ambil gambar terbesar dari folder sumber sebagai contoh."""
+        d = self.var_in.get().strip()
+        if d and os.path.isdir(d):
+            try:
+                found = iter_sources(d, self.var_recursive.get())
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, f"Gagal membaca folder sumber:\n{exc}")
+                return
+            if found:
+                self.preview_source(max(found, key=os.path.getsize))
+                return
+        messagebox.showinfo(APP_NAME, "Folder sumber belum dipilih atau belum ada gambar di dalamnya.")
+        self.pick_preview_file()
+
+    def pick_preview_file(self):
+        f = filedialog.askopenfilename(
+            title="Pilih gambar contoh",
+            filetypes=[("Gambar", "*.jpg *.jpeg *.png *.webp *.heic *.heif *.bmp *.tif *.tiff"),
+                       ("Semua file", "*.*")],
+        )
+        if f:
+            self.preview_source(f)
+
+    def schedule_preview(self, delay: int = 400):
+        """Tunda sedikit supaya geser slider tidak memicu hitung berkali-kali."""
+        if self.prev_after_id:
+            try:
+                self.root.after_cancel(self.prev_after_id)
+            except Exception:
+                pass
+        self.prev_after_id = self.root.after(delay, self.run_preview)
+
+    def run_preview(self):
+        self.prev_after_id = None
+        if not self.prev_path or not os.path.isfile(self.prev_path):
+            self.var_prev_info.set("Belum ada contoh gambar.")
+            return
+        if self.worker and self.worker.is_alive():
+            self.schedule_preview(600)  # jangan berebut CPU dengan proses kompresi
+            return
+        if self.prev_busy:
+            self.schedule_preview(250)
+            return
+        self.prev_busy = True
+        self.var_prev_info.set("Menghitung pratinjau…")
+        o = {
+            "src": self.prev_path,
+            "box": int(float(self.var_width.get() or 0)),
+            "quality": int(float(self.var_quality.get())),
+            "fmt": LABEL_FMT.get(self.var_fmt.get(), "JPEG"),
+        }
+        threading.Thread(target=self._preview_job, args=(o,), daemon=True).start()
+
+    def _preview_job(self, o: dict):
+        work = None
+        try:
+            work = tempfile.mkdtemp(prefix="ic-prev-")
+            dst = os.path.join(work, "hasil" + FMT_EXT[o["fmt"]])
+            r = compress_one(o["src"], dst, o["box"], o["quality"], o["fmt"])
+
+            def small(path: str):
+                im = Image.open(path)
+                im = ImageOps.exif_transpose(im)
+                im.thumbnail((PREVIEW_PX - 6, PREVIEW_PY - 6))
+                return im.convert("RGB")
+
+            self.q.put(("prev", {
+                "name": os.path.basename(o["src"]),
+                "before": small(o["src"]),
+                "after": small(dst),
+                "orig": r["orig"],
+                "new": r["new"],
+                "bdim": r["before"],
+                "adim": r["after"],
+            }))
+        except Exception as exc:
+            self.q.put(("prev_err", str(exc)))
+        finally:
+            if work:
+                shutil.rmtree(work, ignore_errors=True)
+
+    def show_preview(self, p: dict):
+        self.prev_busy = False
+        try:
+            self.ph_before = ImageTk.PhotoImage(p["before"])
+            self.ph_after = ImageTk.PhotoImage(p["after"])
+        except Exception as exc:
+            self.var_prev_info.set(f"Pratinjau gagal ditampilkan: {exc}")
+            return
+        self.lbl_prev_b.configure(image=self.ph_before)
+        self.lbl_prev_a.configure(image=self.ph_after)
+        self.var_prev_info.set(f"Contoh: {p['name']}")
+        self.var_prev_b.set(f"Sumber  ·  {human(p['orig'])}  ·  {p['bdim'][0]}×{p['bdim'][1]}")
+        self.var_prev_a.set(f"Hasil  ·  {human(p['new'])}  ·  {p['adim'][0]}×{p['adim'][1]}"
+                            f"  ({pct_text(p['orig'], p['new'])})")
 
     def pick_in(self):
         d = filedialog.askdirectory(title="Pilih folder sumber", initialdir=self.var_in.get() or None)
@@ -318,6 +696,8 @@ class App:
             self.var_in.set(os.path.normpath(d))
             if not self.var_out.get():
                 self.var_out.set(os.path.normpath(d))
+            if not self.prev_path:
+                self.pick_preview()
 
     def pick_out(self):
         d = filedialog.askdirectory(title="Pilih folder tujuan", initialdir=self.var_out.get() or None)
@@ -346,6 +726,11 @@ class App:
                         self.var_status.set(f"{pct:.0f}%  ·  {name}")
                 elif kind == "status":
                     self.var_status.set(payload)
+                elif kind == "prev":
+                    self.show_preview(payload)
+                elif kind == "prev_err":
+                    self.prev_busy = False
+                    self.var_prev_info.set(f"Pratinjau gagal: {payload}")
                 elif kind == "done":
                     self.finish_ui()
         except queue.Empty:
@@ -386,6 +771,9 @@ class App:
             "fmt": fmt,
             "skip_bigger": self.var_skip_bigger.get(),
             "delete_orig": self.var_delete_orig.get(),
+            "jobs": int(float(self.var_jobs.get() or 0)),
+            # dibaca di sini (main thread) karena run_job jalan di thread lain
+            "open_after": self.var_open_after.get(),
         }
 
         self.cancel.clear()
@@ -413,10 +801,12 @@ class App:
             return
 
         total = len(files)
+        jobs = int(o.get("jobs") or 0) or cpu_default()
         self.log(f"Folder sumber : {o['in_dir']}")
         self.log(f"Folder tujuan : {o['out_dir']}" + ("  (in-place)" if o["in_place"] else ""))
         self.log(f"Format        : {o['fmt']}   Lebar maks: {o['box'] or 'tanpa resize'}   "
                  f"Kualitas: {o['quality']}")
+        self.log(f"Paralel       : {jobs} worker" + (" (berurutan)" if jobs <= 1 else ""))
         self.log(f"File ditemukan: {total}")
         self.log("-" * 72)
         if not total:
@@ -424,63 +814,56 @@ class App:
             self.q.put(("done", None))
             return
 
+        tasks = build_tasks(
+            files, o["in_dir"], o["out_dir"], o["fmt"], o["in_place"],
+            o["box"], o["quality"], o["skip_bigger"], o["delete_orig"],
+        )
+
         sum_before = sum_after = 0
         ok = skip = err = 0
-        t0 = __import__("time").time()
+        t0 = time.time()
+        done = 0
 
-        for idx, src in enumerate(files, 1):
-            if self.cancel.is_set():
-                self.log("-" * 72)
-                self.log("[!] Dibatalkan oleh pengguna.")
-                break
-            name = os.path.relpath(src, o["in_dir"])
-            self.q.put(("progress", (idx - 1, total, name)))
-            dst = build_dest(src, o["in_dir"], o["out_dir"], o["fmt"], o["in_place"])
-            tmp = os.path.join(o["out_dir"], f".~ic-{idx}.tmp")
-            try:
-                r = compress_one(src, tmp, o["box"], o["quality"], o["fmt"])
-                if o["skip_bigger"] and r["new"] >= r["orig"] and os.path.abspath(dst) != os.path.abspath(src):
-                    os.remove(tmp)
-                    skip += 1
-                    self.log(f"[SKIP] {name}  ({human(r['orig'])} -> {human(r['new'])}, tidak lebih kecil)")
-                    continue
-
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                os.replace(tmp, dst)
+        for res in run_tasks(tasks, jobs, cancel=self.cancel):
+            done += 1
+            name = res["label"]
+            if res["status"] == "ok":
                 ok += 1
-                sum_before += r["orig"]
-                sum_after += r["new"]
-                save = (r["orig"] - r["new"]) / r["orig"] * 100 if r["orig"] else 0.0
-                dim = f"{r['before'][0]}x{r['before'][1]} -> {r['after'][0]}x{r['after'][1]}"
-                tail = ""
-                if o["delete_orig"] and os.path.abspath(dst) != os.path.abspath(src):
-                    try:
-                        os.remove(src)
-                        tail = "  [asli dihapus]"
-                    except Exception as exc:
-                        tail = f"  [gagal hapus asli: {exc}]"
-                self.log(f"[OK]   {name}  {human(r['orig'])} -> {human(r['new'])}  "
-                         f"(-{save:.0f}%)  {dim}{tail}")
-            except Exception as exc:
+                sum_before += res["orig"]
+                sum_after += res["new"]
+                dim = (f"{res['before'][0]}x{res['before'][1]} -> "
+                       f"{res['after'][0]}x{res['after'][1]}")
+                tail = "  [asli dihapus]" if res.get("deleted_orig") else ""
+                self.log(f"[OK]   {name}  {human(res['orig'])} -> {human(res['new'])}  "
+                         f"({pct_text(res['orig'], res['new'])})  {dim}{tail}")
+            elif res["status"] == "skip":
+                skip += 1
+                self.log(f"[SKIP] {name}  ({human(res['orig'])} -> {human(res['new'])}, "
+                         "tidak lebih kecil)")
+            else:
                 err += 1
-                if os.path.exists(tmp):
-                    try:
-                        os.remove(tmp)
-                    except Exception:
-                        pass
-                self.log(f"[ERR]  {name}: {exc}")
+                self.log(f"[ERR]  {name}: {res['error']}")
+            self.q.put(("progress", (done, total, name)))
 
-        self.q.put(("progress", (total, total, None)))
-        dt = __import__("time").time() - t0
+        cancelled = self.cancel.is_set()
+        if cancelled:
+            drop_leftover_tmp([o["out_dir"]])
+            self.log("[!] Dibatalkan — file yang sudah selesai tetap tersimpan.")
+
+        self.q.put(("progress", (done, total, None)))
+        dt = time.time() - t0
         self.log("-" * 72)
         self.log(f"Selesai dalam {dt:.1f}s  ·  OK {ok}  ·  dilewati {skip}  ·  gagal {err}")
+        if sum_before:
+            self.log(f"Kecepatan     : {sum_before / 1048576 / max(dt, 1e-6):.1f} MB/s")
         if ok:
             self.log(f"Total ukuran  : {human(sum_before)} -> {human(sum_after)}")
             if sum_before:
                 self.log(f"Ruang dihemat : {(sum_before - sum_after) / sum_before * 100:.1f}%")
-        self.q.put(("status", f"Selesai — {ok} file diproses."))
+        self.q.put(("status", ("Dihentikan — " if cancelled else "Selesai — ")
+                    + f"{ok} file diproses."))
         self.last_out_dir = o["in_dir"] if o["in_place"] else o["out_dir"]
-        if self.var_open_after.get() and self.last_out_dir:
+        if o.get("open_after") and self.last_out_dir and ok:
             self.q.put(("log", f"[i] Membuka {self.last_out_dir}"))
             try:
                 os.startfile(self.last_out_dir)  # noqa: S606
@@ -495,6 +878,11 @@ class App:
 
     def on_close(self):
         self.save_config()
+        if self.prev_after_id:
+            try:
+                self.root.after_cancel(self.prev_after_id)
+            except Exception:
+                pass
         if self.worker and self.worker.is_alive():
             if not messagebox.askokcancel(APP_NAME, "Proses masih berjalan. Hentikan dan keluar?"):
                 return
@@ -513,6 +901,7 @@ CLI_DEFAULTS = {
     "fmt": "JPEG",
     "skip_bigger": True,
     "delete_orig": False,
+    "jobs": 0,
 }
 
 USAGE = f"""{APP_NAME} v{APP_VER}
@@ -523,17 +912,19 @@ Pemakaian:
   ImageCompressor.exe --cli "D:\\foto"    proses langsung tanpa GUI (headless)
 
 Opsi headless:
-  --out DIR         folder tujuan (default: <folder>_compressed)
+  --out DIR         folder tujuan (default: <folder>_compressed, atau
+                    <nama>_compressed.<ext> untuk file yang ditarik langsung)
   --in-place        timpa di tempat (nama file mengikuti format keluaran)
   --width N         lebar maksimal px, 0 = tanpa resize (default: 1920)
   --quality N       kualitas JPEG/WebP 1-100 (default: 85)
   --format FMT      JPEG | WEBP | PNG (default: JPEG)
+  --jobs N          jumlah worker paralel, 1 = berurutan (default: otomatis)
   --no-recursive    jangan telusuri subfolder
   --keep-bigger     tetap tulis hasil walau ukurannya tidak lebih kecil
   --delete-orig     hapus file asli setelah konversi format
   -h, --help        tampilkan bantuan ini
 
-Menarik folder ke atas .exe = jalankan mode headless otomatis.
+Menarik folder ATAU file gambar ke atas .exe = jalankan mode headless otomatis.
 """
 
 
@@ -557,88 +948,231 @@ def popup(title: str, body: str) -> None:
         pass
 
 
-def run_headless(src_dir: str, o: dict) -> int:
-    src_dir = os.path.abspath(src_dir)
-    if not os.path.isdir(src_dir):
-        say(f"Bukan folder: {src_dir}")
-        if sys.stdout is None:
-            popup(APP_NAME, f"Bukan folder:\n{src_dir}")
-        return 2
+def launched_from_shell(argv: list[str]) -> bool:
+    """Apakah proses ini dijalankan dari console (cmd/PowerShell/terminal)?
+
+    Exe windowed (`--windows-console-mode=disable`) selalu punya
+    `sys.stdout is None`, bahkan waktu dijalankan dari cmd — jadi stdout
+    sendirian tidak cukup. Cek dua hal:
+      1. proses ini punya console window sendiri, atau
+      2. ada console shell (cmd/pwsh/bash/wt) di rantai proses induk.
+
+    Induk langsung Explorer = drag & drop; induk terminal = dijalankan manual.
+    """
+    if sys.stdout is not None and hasattr(sys.stdout, "fileno"):
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.windll.kernel32
+        if k32.GetConsoleWindow():
+            return True
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.CHAR * 260),
+            ]
+
+        snap = k32.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+        if not snap or snap == -1:
+            return False
+        table: dict[int, tuple[int, str]] = {}
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(pe)
+        if k32.Process32First(snap, ctypes.byref(pe)):
+            while True:
+                name = pe.szExeFile.decode(errors="ignore").lower()
+                table[pe.th32ProcessID] = (pe.th32ParentProcessID, name)
+                if not k32.Process32Next(snap, ctypes.byref(pe)):
+                    break
+        k32.CloseHandle(snap)
+
+        shells = {
+            "cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe", "sh.exe",
+            "wt.exe", "windowsterminal.exe", "conhost.exe", "mintty.exe",
+            "zsh.exe", "fish.exe", "nu.exe", "wezterm-gui.exe",
+            "alacritty.exe", "tabby.exe", "code.exe", "python.exe",
+            "pythonw.exe", "uv.exe", "git-bash.exe",
+        }
+        cur = os.getpid()
+        for _ in range(8):
+            entry = table.get(cur)
+            if not entry:
+                return False
+            parent = entry[0]
+            if not parent:
+                return False
+            pname = table.get(parent, (0, ""))[1]
+            if pname == "explorer.exe":
+                return False          # drag & drop dari Explorer
+            if pname in shells:
+                return True           # ada shell/terminal di rantainya
+            cur = parent
+        return False
+    except Exception:
+        # apa pun yang gagal: anggap drag & drop (mode headless) — lebih baik
+        # memproses file daripada membuka GUI tanpa diminta
+        return False
+
+
+def _split_targets(targets: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Pisahkan target jadi (folder, file gambar, sisanya)."""
+    dirs: list[str] = []
+    imgs: list[str] = []
+    bad: list[str] = []
+    for t in targets:
+        p = os.path.abspath(t)
+        if os.path.isdir(p):
+            dirs.append(p)
+        elif os.path.isfile(p) and p.lower().endswith(EXTS):
+            imgs.append(p)
+        else:
+            bad.append(p)
+    return dirs, imgs, bad
+
+
+def run_headless(targets, o: dict, interactive: bool | None = None) -> int:
+    """Proses folder dan/atau file langsung — mode drag & drop maupun --cli.
+
+    `targets` boleh satu string atau daftar. Folder diproses seperti biasa
+    (hasil ke `<folder>_compressed`), file langsung diproses satu-satu dengan
+    hasil `<nama>_compressed.<ext>` di folder yang sama.
+
+    `interactive` = True kalau dipicu drag & drop (tidak ada output console),
+    jadi ringkasan ditampilkan lewat messagebox.
+    """
+    if isinstance(targets, str):
+        targets = [targets]
 
     fmt = o["fmt"]
     in_place = o["in_place"]
-    out_dir = src_dir if in_place else (o["out"] or src_dir + "_compressed")
-    interactive = sys.stdout is None  # dijalankan dari Explorer / drag & drop
+    if interactive is None:
+        interactive = sys.stdout is None  # dipanggil dari Explorer / drag & drop
 
-    try:
-        files = iter_sources(src_dir, o["recursive"])
-    except Exception as exc:
-        say(f"[ERR] Gagal membaca folder: {exc}")
+    dirs, imgs, bad = _split_targets(targets)
+    for b in bad:
+        say(f"[!] Dilewati (bukan folder atau gambar): {b}")
+
+    if not dirs and not imgs:
+        msg = "Tidak ada folder atau file gambar yang bisa diproses."
+        say(msg)
         if interactive:
-            popup(APP_NAME, f"Gagal membaca folder:\n{exc}")
+            popup(APP_NAME, msg)
         return 1
 
-    if not files:
-        say("Tidak ada file gambar yang cocok.")
+    tasks: list[dict] = []
+    out_dirs: list[str] = []
+
+    for d in dirs:
+        try:
+            found = iter_sources(d, o["recursive"])
+        except Exception as exc:
+            say(f"[ERR] Gagal membaca folder {d}: {exc}")
+            continue
+        if not found:
+            continue
+        out_d = d if in_place else (o["out"] or d + "_compressed")
+        if not in_place:
+            os.makedirs(out_d, exist_ok=True)
+        out_dirs.append(out_d)
+        tasks += build_tasks(
+            found, d, out_d, fmt, in_place, o["box"], o["quality"],
+            o["skip_bigger"], o["delete_orig"],
+        )
+
+    # File yang ditarik langsung ke exe: hasil di sebelah file aslinya.
+    for f in imgs:
+        d0 = os.path.dirname(f) or "."
+        stem = os.path.splitext(os.path.basename(f))[0]
+        ext = FMT_EXT[fmt]
+        if o["out"]:
+            os.makedirs(o["out"], exist_ok=True)
+            dst = os.path.join(o["out"], stem + ext)
+        else:
+            dst = os.path.join(d0, stem + ("_compressed" if not in_place else "") + ext)
+        if os.path.abspath(dst) == os.path.abspath(f):
+            dst = os.path.join(d0, stem + "_compressed" + ext)
+        tmp_dir = os.path.dirname(dst) or "."
+        out_dirs.append(tmp_dir)
+        tasks.append(
+            {
+                "src": f,
+                "dst": dst,
+                "tmp_dir": tmp_dir,
+                "label": os.path.basename(f),
+                "box": o["box"],
+                "quality": o["quality"],
+                "fmt": fmt,
+                "skip_bigger": o["skip_bigger"],
+                "delete_orig": o["delete_orig"],
+            }
+        )
+
+    if not tasks:
+        msg = "Tidak ada file gambar yang cocok."
+        say(msg)
         if interactive:
-            popup(APP_NAME, f"Tidak ada file gambar di:\n{src_dir}")
+            popup(APP_NAME, msg)
         return 1
 
-    if not in_place:
-        os.makedirs(out_dir, exist_ok=True)
+    out_dirs = list(dict.fromkeys(out_dirs))
+    jobs = int(o.get("jobs") or 0) or cpu_default()
 
     say(f"{APP_NAME} v{APP_VER}  ·  headless")
-    say(f"Folder sumber : {src_dir}")
-    say(f"Folder tujuan : {out_dir}" + ("  (in-place)" if in_place else ""))
+    if dirs and imgs:
+        say(f"Target        : {len(dirs)} folder + {len(imgs)} file")
+    elif dirs:
+        say(f"Target        : folder {dirs[0]}" if len(dirs) == 1
+            else f"Target        : {len(dirs)} folder")
+    else:
+        say(f"Target        : {len(imgs)} file")
+    say(f"Folder tujuan : {', '.join(out_dirs)}" + ("  (in-place)" if in_place else ""))
     say(f"Format        : {fmt}   Lebar maks: {o['box'] or 'tanpa resize'}   "
         f"Kualitas: {o['quality']}")
-    say(f"File ditemukan: {len(files)}")
+    say(f"Paralel       : {jobs} worker" + (" (berurutan)" if jobs <= 1 else ""))
+    say(f"File ditemukan: {len(tasks)}")
     say("-" * 72)
 
     ok = skip = err = 0
     sum_before = sum_after = 0
     failures: list[str] = []
-
-    for idx, src in enumerate(files, 1):
-        name = os.path.relpath(src, src_dir)
-        dst = build_dest(src, src_dir, out_dir, fmt, in_place)
-        tmp = os.path.join(out_dir, f".~ic-{idx}.tmp")
-        try:
-            r = compress_one(src, tmp, o["box"], o["quality"], fmt)
-            if o["skip_bigger"] and r["new"] >= r["orig"] and os.path.abspath(dst) != os.path.abspath(src):
-                os.remove(tmp)
-                skip += 1
-                say(f"[{idx}/{len(files)}] SKIP  {name}  ({human(r['orig'])} -> {human(r['new'])}, "
-                    "tidak lebih kecil)")
-                continue
-
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            os.replace(tmp, dst)
+    t0 = time.perf_counter()
+    done = 0
+    for res in run_tasks(tasks, jobs):
+        done += 1
+        name = res["label"]
+        tag = f"[{done}/{len(tasks)}]"
+        if res["status"] == "ok":
             ok += 1
-            sum_before += r["orig"]
-            sum_after += r["new"]
-            save = (r["orig"] - r["new"]) / r["orig"] * 100 if r["orig"] else 0.0
-            tail = ""
-            if o["delete_orig"] and os.path.abspath(dst) != os.path.abspath(src):
-                try:
-                    os.remove(src)
-                    tail = "  [asli dihapus]"
-                except Exception as exc:
-                    tail = f"  [gagal hapus asli: {exc}]"
-            say(f"[{idx}/{len(files)}] OK    {name}  {human(r['orig'])} -> {human(r['new'])}  "
-                f"(-{save:.0f}%){tail}")
-        except Exception as exc:
+            sum_before += res["orig"]
+            sum_after += res["new"]
+            tail = "  [asli dihapus]" if res.get("deleted_orig") else ""
+            say(f"{tag} OK    {name}  {human(res['orig'])} -> {human(res['new'])}  "
+                f"({pct_text(res['orig'], res['new'])}){tail}")
+        elif res["status"] == "skip":
+            skip += 1
+            say(f"{tag} SKIP  {name}  ({human(res['orig'])} -> {human(res['new'])}, "
+                "tidak lebih kecil)")
+        else:
             err += 1
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
-            failures.append(f"{name}: {exc}")
-            say(f"[{idx}/{len(files)}] ERR   {name}: {exc}")
+            failures.append(f"{name}: {res['error']}")
+            say(f"{tag} ERR   {name}: {res['error']}")
+    dur = time.perf_counter() - t0
 
     say("-" * 72)
-    say(f"Selesai  ·  OK {ok}  ·  dilewati {skip}  ·  gagal {err}")
+    say(f"Selesai dalam {dur:.1f}s  ·  OK {ok}  ·  dilewati {skip}  ·  gagal {err}")
+    if sum_before:
+        say(f"Kecepatan     : {sum_before / 1048576 / max(dur, 1e-6):.1f} MB/s")
     if ok:
         say(f"Total ukuran  : {human(sum_before)} -> {human(sum_after)}")
         if sum_before:
@@ -650,14 +1184,16 @@ def run_headless(src_dir: str, o: dict) -> int:
             saved = (f"\nTotal ukuran: {human(sum_before)} -> {human(sum_after)} "
                      f"(hemat {(sum_before - sum_after) / sum_before * 100:.1f}%)")
         body = (f"{ok} berhasil  ·  {skip} dilewati  ·  {err} gagal  "
-                f"(dari {len(files)} file){saved}\n\nHasil ada di:\n{out_dir}")
+                f"(dari {len(tasks)} file){saved}\n\nHasil ada di:\n"
+                + "\n".join(out_dirs[:3]))
         if failures:
             body += "\n\nGagal:\n" + "\n".join(failures[:5])
         popup(f"{APP_NAME} — selesai", body)
-        try:
-            os.startfile(out_dir)  # noqa: S606
-        except Exception:
-            pass
+        for od in out_dirs[:2]:
+            try:
+                os.startfile(od)  # noqa: S606
+            except Exception:
+                pass
 
     return 0 if not err else 1
 
@@ -667,7 +1203,7 @@ def parse_cli(argv: list[str]) -> dict | None:
     o = dict(CLI_DEFAULTS)
     o["out"] = None
     o["in_place"] = False
-    o["dir"] = None
+    o["targets"] = []
 
     i = 0
     while i < len(argv):
@@ -692,6 +1228,9 @@ def parse_cli(argv: list[str]) -> dict | None:
         elif a in ("--quality", "-q") and i + 1 < len(argv):
             i += 1
             o["quality"] = min(100, max(1, int(float(argv[i]))))
+        elif a in ("--jobs", "-j") and i + 1 < len(argv):
+            i += 1
+            o["jobs"] = max(0, int(float(argv[i])))
         elif a == "--format" and i + 1 < len(argv):
             i += 1
             fmt = argv[i].upper()
@@ -702,8 +1241,8 @@ def parse_cli(argv: list[str]) -> dict | None:
         elif a.startswith("-"):
             say(f"Opsi tidak dikenal: {a}\n\n{USAGE}")
             return None
-        elif os.path.isdir(a):
-            o["dir"] = os.path.abspath(a)
+        elif os.path.exists(a):
+            o["targets"].append(os.path.abspath(a))
         i += 1
 
     return o
@@ -726,18 +1265,23 @@ def main(argv: list[str] | None = None) -> int:
         say(f"{APP_NAME} v{APP_VER}")
         return 0
 
-    # Drag & drop folder ke .exe => tidak ada console (stdout None) => langsung proses.
-    has_dir = any(os.path.isdir(a) for a in argv)
-    if "--cli" in argv or (has_dir and sys.stdout is None):
+    # Drag & drop folder ATAU file gambar ke .exe => langsung proses tanpa GUI.
+    # Dijalankan dari console (cmd/PowerShell) => GUI, walaupun exe-nya windowed.
+    def _is_target(a: str) -> bool:
+        return os.path.isdir(a) or (os.path.isfile(a) and a.lower().endswith(EXTS))
+
+    has_target = any(_is_target(a) for a in argv)
+    from_shell = launched_from_shell(argv)
+    if "--cli" in argv or (has_target and not from_shell):
         opts = parse_cli(argv)
         if opts is None:
             return 1
-        if not opts["dir"]:
+        if not opts["targets"]:
             say(USAGE)
-            if sys.stdout is None:
+            if not from_shell:
                 popup(f"{APP_NAME} — bantuan", USAGE)
             return 2
-        return run_headless(opts["dir"], opts)
+        return run_headless(opts["targets"], opts, interactive=not from_shell)
 
     try:
         import ctypes
@@ -746,14 +1290,23 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         pass
 
+    # Argumen dari console: folder mengisi folder sumber, file gambar mengisi
+    # folder sumber sekaligus jadi contoh di panel pratinjau.
     preset = None
+    sample = None
     for arg in argv:
         if os.path.isdir(arg):
             preset = os.path.abspath(arg)
             break
+        if os.path.isfile(arg) and arg.lower().endswith(EXTS):
+            preset = os.path.dirname(os.path.abspath(arg))
+            sample = os.path.abspath(arg)
+            break
 
     root = tk.Tk()
-    App(root, preset)
+    app = App(root, preset)
+    if sample:
+        app.preview_source(sample)
     root.mainloop()
     return 0
 
