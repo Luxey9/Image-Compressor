@@ -47,7 +47,7 @@ def main():
     biggest = max(ic.iter_sources(src, True), key=os.path.getsize)
     app.preview_source(biggest)
     settle(root, app)
-    print(f"q85  w1920 JPEG : {app.var_prev_a.get()}")
+    print(f"q85  w1920 JPEG : {app.ui.chip_a._text}")
 
     cases = [
         ("kualitas 45", lambda: app.var_quality.set(45)),
@@ -56,12 +56,12 @@ def main():
         ("format WEBP", lambda: app.var_fmt.set(ic.FMT_LABEL["WEBP"])),
         ("format PNG", lambda: app.var_fmt.set(ic.FMT_LABEL["PNG"])),
     ]
-    seen = [app.var_prev_a.get()]
+    seen = [app.ui.chip_a._text]
     for label, act in cases:
         act()
         time.sleep(0.1)
         ok = settle(root, app)
-        line = app.var_prev_a.get()
+        line = app.ui.chip_a._text
         changed = line != seen[-1]
         print(f"{label:<15}: {line}   [{'BERUBAH' if changed else 'TIDAK BERUBAH'}]"
               f"{'' if ok else '  (timeout!)'}")

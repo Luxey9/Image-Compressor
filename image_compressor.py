@@ -31,7 +31,7 @@ except Exception:
     HEIC_SUPPORT = False
 
 APP_NAME = "Image Compressor"
-APP_VER = "1.1.0"
+APP_VER = "1.2.0"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".image_compressor.json")
 
 BASE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff")
@@ -189,8 +189,8 @@ def cpu_default() -> int:
     ram = avail_ram_mb()
     if ram:
         by_ram = max(2, ram // 300)  # ~300 MB per worker
-        return max(1, min(cores, 16, by_ram))
-    return max(1, min(cores, 8))
+        return max(1, min(cores, by_ram))
+    return max(1, min(cores, 4))
 
 
 def make_tmp(dst_dir: str) -> str:
@@ -373,15 +373,21 @@ class App:
         self.var_prev_b = tk.StringVar(value="")
         self.var_prev_a = tk.StringVar(value="")
 
+        # konstanta modul diekspos ke GUI v1.2 (gui_v12 baca lewat instance)
+        self.APP_VER = APP_VER
+        self.APP_NAME = APP_NAME
+        self.FMT_LABEL = FMT_LABEL
+        self.LABEL_FMT = LABEL_FMT
+        self.EXTS = EXTS
+        self.HEIC_SUPPORT = HEIC_SUPPORT
+        self.human = human
+        self.pct_text = pct_text
+        self.cpu_default = cpu_default
+
         self._build_ui()
-        self.sync_mode()
         self.update_quality_label()
         self.update_jobs_label()
-        self.var_width.trace_add("write", lambda *_: self.schedule_preview())
-        self.var_quality.trace_add("write", lambda *_: self.schedule_preview())
-        self.var_fmt.trace_add("write", lambda *_: self.schedule_preview())
-        self.var_jobs.trace_add("write", lambda *_: self.update_jobs_label())
-        self.root.after(120, self.pump)
+        # trace pratinjau dipasang gui_v12 (_wire); di sini tidak dipasang lagi
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------- config ----------
@@ -414,174 +420,24 @@ class App:
 
     # ---------- ui ----------
     def _build_ui(self):
-        style = ttk.Style()
-        try:
-            style.theme_use("vista")
-        except tk.TclError:
-            pass
-        style.configure("TLabelframe.Label", font=("Segoe UI Semibold", 10))
-        style.configure("Go.TButton", font=("Segoe UI Semibold", 10))
-        style.configure("Hdr.TLabel", font=("Segoe UI Semibold", 12))
+        """UI v1.2.0 ada di gui_v12.py; App tetap pemilik state + mesin."""
+        import gui_v12
 
-        pad = {"padx": 10, "pady": 6}
-        outer = ttk.Frame(self.root, padding=12)
-        outer.pack(fill="both", expand=True)
-        outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(5, weight=1)
+        self.ui = gui_v12.GUI(self.root, self)
+        self.root.after(120, self.ui.run)
 
-        ttk.Label(outer, text=APP_NAME, style="Hdr.TLabel").grid(row=0, column=0, sticky="w")
-        sub = "HEIC/iPhone: didukung" if HEIC_SUPPORT else "HEIC/iPhone: tidak didukung di build ini"
-        ttk.Label(outer, text=f"Kompres & resize massal untuk aset web  ·  {sub}",
-                  foreground="#666").grid(row=1, column=0, sticky="w", pady=(0, 8))
-
-        # Sumber
-        f_in = ttk.LabelFrame(outer, text="1 · Folder sumber")
-        f_in.grid(row=2, column=0, sticky="ew", **pad)
-        f_in.columnconfigure(0, weight=1)
-        self.e_in = ttk.Entry(f_in, textvariable=self.var_in)
-        self.e_in.grid(row=0, column=0, sticky="ew", padx=(8, 6), pady=8)
-        ttk.Button(f_in, text="Pilih Folder…", command=self.pick_in).grid(row=0, column=1, padx=(0, 8), pady=8)
-        ttk.Checkbutton(f_in, text="Sertakan subfolder (rekursif)", variable=self.var_recursive).grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
-
-        # Tujuan
-        f_out = ttk.LabelFrame(outer, text="2 · Folder tujuan")
-        f_out.grid(row=3, column=0, sticky="ew", **pad)
-        f_out.columnconfigure(0, weight=1)
-        ttk.Radiobutton(f_out, text="Timpa di tempat (hasil menimpa folder sumber)",
-                        variable=self.var_mode, value="inplace", command=self.sync_mode).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 2))
-        ttk.Radiobutton(f_out, text="Folder lain (sumber tidak disentuh)",
-                        variable=self.var_mode, value="own", command=self.sync_mode).grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=8, pady=2)
-        self.e_out = ttk.Entry(f_out, textvariable=self.var_out)
-        self.e_out.grid(row=2, column=0, sticky="ew", padx=(28, 6), pady=(2, 8))
-        self.btn_out = ttk.Button(f_out, text="Pilih Folder…", command=self.pick_out)
-        self.btn_out.grid(row=2, column=1, padx=(0, 8), pady=(2, 8))
-
-        # Pengaturan
-        f_set = ttk.LabelFrame(outer, text="3 · Pengaturan")
-        f_set.grid(row=4, column=0, sticky="ew", **pad)
-        f_set.columnconfigure(1, weight=1)
-        f_set.columnconfigure(3, weight=1)
-
-        ttk.Label(f_set, text="Lebar maksimal (px, 0 = tanpa resize)").grid(
-            row=0, column=0, sticky="w", padx=8, pady=(8, 4))
-        ttk.Spinbox(f_set, from_=0, to=12000, increment=80, width=8,
-                    textvariable=self.var_width).grid(row=0, column=1, sticky="w", padx=6, pady=(8, 4))
-
-        ttk.Label(f_set, text="Format keluaran").grid(row=0, column=2, sticky="w", padx=(18, 4), pady=(8, 4))
-        combo = ttk.Combobox(f_set, textvariable=self.var_fmt, state="readonly",
-                             values=list(FMT_LABEL.values()), width=44)
-        combo.grid(row=0, column=3, sticky="ew", padx=(6, 8), pady=(8, 4))
-        combo.bind("<<ComboboxSelected>>", lambda _e: self.schedule_preview())
-
-        ttk.Label(f_set, text="Kualitas (JPEG/WebP)").grid(row=1, column=0, sticky="w", padx=8, pady=4)
-        qrow = ttk.Frame(f_set)
-        qrow.grid(row=1, column=1, columnspan=3, sticky="ew", padx=6, pady=4)
-        qrow.columnconfigure(0, weight=1)
-        self.scale_q = ttk.Scale(qrow, from_=30, to=100, orient="horizontal",
-                                 variable=self.var_quality, command=lambda _=None: self.update_quality_label())
-        self.scale_q.grid(row=0, column=0, sticky="ew")
-        ttk.Label(qrow, textvariable=tk.StringVar(), width=0).grid(row=0, column=2)
-        self.lbl_q = ttk.Label(qrow, text="", width=18)
-        self.lbl_q.grid(row=0, column=1, sticky="w", padx=8)
-
-        opts = ttk.Frame(f_set)
-        opts.grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(2, 8))
-        ttk.Checkbutton(opts, text="Lewati jika hasil tidak lebih kecil",
-                        variable=self.var_skip_bigger).grid(row=0, column=0, sticky="w", padx=2)
-        ttk.Checkbutton(opts, text="Hapus file asli setelah konversi format",
-                        variable=self.var_delete_orig).grid(row=1, column=0, sticky="w", padx=2)
-        ttk.Checkbutton(opts, text="Buka folder hasil setelah selesai",
-                        variable=self.var_open_after).grid(row=2, column=0, sticky="w", padx=2)
-
-        ttk.Label(f_set, text="Worker paralel (0 = otomatis)").grid(
-            row=2, column=0, sticky="w", padx=8, pady=4)
-        ttk.Spinbox(f_set, from_=0, to=64, increment=1, width=8,
-                    textvariable=self.var_jobs, command=self.update_jobs_label).grid(
-            row=2, column=1, sticky="w", padx=6, pady=4)
-        self.lbl_jobs = ttk.Label(f_set, text="", foreground="#666")
-        self.lbl_jobs.grid(row=2, column=2, columnspan=2, sticky="w", padx=(18, 8), pady=4)
-
-        # Aksi + progress
-        f_run = ttk.Frame(outer)
-        f_run.grid(row=5, column=0, sticky="nsew", **pad)
-        f_run.columnconfigure(0, weight=1)
-        f_run.rowconfigure(4, weight=1)
-
-        bar = ttk.Frame(f_run)
-        bar.grid(row=0, column=0, sticky="ew")
-        bar.columnconfigure(0, weight=1)
-        self.btn_go = ttk.Button(bar, text="Mulai Kompres", style="Go.TButton", command=self.start)
-        self.btn_go.grid(row=0, column=0, sticky="w")
-        self.btn_stop = ttk.Button(bar, text="Stop", command=self.stop, state="disabled")
-        self.btn_stop.grid(row=0, column=1, padx=6)
-        ttk.Label(bar, textvariable=self.var_count, width=14, anchor="e").grid(row=0, column=2, padx=(6, 0))
-
-        self.pb = ttk.Progressbar(f_run, mode="determinate", maximum=100)
-        self.pb.grid(row=1, column=0, sticky="ew", pady=(8, 2))
-        ttk.Label(f_run, textvariable=self.var_status, foreground="#333").grid(row=2, column=0, sticky="w")
-
-        # Pratinjau sebelum-sesudah
-        f_prev = ttk.LabelFrame(f_run, text="Pratinjau sebelum-sesudah  ·  contoh 1 gambar")
-        f_prev.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        f_prev.columnconfigure(0, weight=1)
-        f_prev.columnconfigure(1, weight=1)
-
-        hdr = ttk.Frame(f_prev)
-        hdr.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
-        ttk.Button(hdr, text="Ambil contoh dari folder sumber",
-                   command=self.pick_preview).grid(row=0, column=0, sticky="w")
-        ttk.Button(hdr, text="Pilih file…", command=self.pick_preview_file).grid(
-            row=0, column=1, sticky="w", padx=6)
-        ttk.Label(hdr, textvariable=self.var_prev_info, foreground="#666").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
-
-        self.lbl_prev_b = tk.Label(f_prev, width=PREVIEW_PX, height=PREVIEW_PY,
-                                   background="#f4f4f4", relief="solid", borderwidth=1)
-        self.lbl_prev_b.grid(row=1, column=0, padx=(8, 4), pady=6)
-        self.lbl_prev_a = tk.Label(f_prev, width=PREVIEW_PX, height=PREVIEW_PY,
-                                   background="#f4f4f4", relief="solid", borderwidth=1)
-        self.lbl_prev_a.grid(row=1, column=1, padx=(4, 8), pady=6)
-        ttk.Label(f_prev, textvariable=self.var_prev_b, anchor="center").grid(
-            row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
-        ttk.Label(f_prev, textvariable=self.var_prev_a, anchor="center").grid(
-            row=2, column=1, sticky="ew", padx=8, pady=(0, 8))
-
-        logf = ttk.LabelFrame(f_run, text="Log")
-        logf.grid(row=4, column=0, sticky="nsew", pady=(8, 0))
-        logf.columnconfigure(0, weight=1)
-        logf.rowconfigure(0, weight=1)
-        self.txt = tk.Text(logf, height=7, wrap="none", font=("Consolas", 9),
-                           background="#fbfbfb", relief="flat")
-        self.txt.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
-        sb = ttk.Scrollbar(logf, orient="vertical", command=self.txt.yview)
-        sb.grid(row=0, column=1, sticky="ns", pady=6, padx=(0, 6))
-        self.txt.configure(yscrollcommand=sb.set, state="disabled")
 
     def sync_mode(self):
-        own = self.var_mode.get() == "own"
-        state = "normal" if own else "disabled"
-        self.e_out.configure(state=state)
-        self.btn_out.configure(state=state)
+        """Widget milik gui_v12; no-op di sini supaya kode lama tetap aman."""
+        return
 
     def update_quality_label(self):
-        f = LABEL_FMT.get(self.var_fmt.get(), "JPEG")
-        q = int(float(self.var_quality.get()))
-        note = "" if f in ("JPEG", "WEBP") else " (PNG lossless)"
-        self.lbl_q.configure(text=f"nilai: {q}{note}")
+        """Label kualitas digambar gui_v12; sisanya cukup pratinjau ulang."""
         self.schedule_preview()
 
     def update_jobs_label(self):
-        if not hasattr(self, "lbl_jobs"):
-            return
-        n = int(float(self.var_jobs.get() or 0))
-        cores = os.cpu_count() or 1
-        self.lbl_jobs.configure(
-            text=(f"→ dipakai: {n} worker" if n > 1
-                  else f"→ otomatis: {cpu_default()} worker dari {cores} core")
-        )
+        """Label worker digambar gui_v12."""
+        return
 
     # ---------- pratinjau sebelum-sesudah ----------
     def preview_source(self, path: str):
@@ -676,19 +532,13 @@ class App:
                 shutil.rmtree(work, ignore_errors=True)
 
     def show_preview(self, p: dict):
+        """Data pratinjau sampai di GUI utama: teruskan ke widget compare."""
         self.prev_busy = False
-        try:
-            self.ph_before = ImageTk.PhotoImage(p["before"])
-            self.ph_after = ImageTk.PhotoImage(p["after"])
-        except Exception as exc:
-            self.var_prev_info.set(f"Pratinjau gagal ditampilkan: {exc}")
-            return
-        self.lbl_prev_b.configure(image=self.ph_before)
-        self.lbl_prev_a.configure(image=self.ph_after)
-        self.var_prev_info.set(f"Contoh: {p['name']}")
-        self.var_prev_b.set(f"Sumber  ·  {human(p['orig'])}  ·  {p['bdim'][0]}×{p['bdim'][1]}")
-        self.var_prev_a.set(f"Hasil  ·  {human(p['new'])}  ·  {p['adim'][0]}×{p['adim'][1]}"
-                            f"  ({pct_text(p['orig'], p['new'])})")
+        ui = getattr(self, "ui", None)
+        if ui is not None:
+            ui.show_preview(p)
+        else:
+            self.var_prev_info.set(f"Contoh: {p['name']}")
 
     def pick_in(self):
         d = filedialog.askdirectory(title="Pilih folder sumber", initialdir=self.var_in.get() or None)
@@ -696,8 +546,6 @@ class App:
             self.var_in.set(os.path.normpath(d))
             if not self.var_out.get():
                 self.var_out.set(os.path.normpath(d))
-            if not self.prev_path:
-                self.pick_preview()
 
     def pick_out(self):
         d = filedialog.askdirectory(title="Pilih folder tujuan", initialdir=self.var_out.get() or None)
@@ -709,33 +557,10 @@ class App:
         self.q.put(("log", line))
 
     def pump(self):
-        try:
-            while True:
-                kind, payload = self.q.get_nowait()
-                if kind == "log":
-                    self.txt.configure(state="normal")
-                    self.txt.insert("end", payload + "\n")
-                    self.txt.see("end")
-                    self.txt.configure(state="disabled")
-                elif kind == "progress":
-                    done, total, name = payload
-                    pct = 0 if not total else done * 100.0 / total
-                    self.pb.configure(value=pct)
-                    self.var_count.set(f"{done} / {total}")
-                    if name:
-                        self.var_status.set(f"{pct:.0f}%  ·  {name}")
-                elif kind == "status":
-                    self.var_status.set(payload)
-                elif kind == "prev":
-                    self.show_preview(payload)
-                elif kind == "prev_err":
-                    self.prev_busy = False
-                    self.var_prev_info.set(f"Pratinjau gagal: {payload}")
-                elif kind == "done":
-                    self.finish_ui()
-        except queue.Empty:
-            pass
-        self.root.after(120, self.pump)
+        """v1.2.0: antrean dibaca gui_v12.GUI.run(). Dipertahankan kosong
+        supaya kode lama yang memanggil pump() tidak memicu dua konsumen
+        yang berebut isi queue."""
+        return
 
     # ---------- run ----------
     def start(self):
@@ -777,12 +602,6 @@ class App:
         }
 
         self.cancel.clear()
-        self.txt.configure(state="normal")
-        self.txt.delete("1.0", "end")
-        self.txt.configure(state="disabled")
-        self.pb.configure(value=0)
-        self.btn_go.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
         self.save_config()
 
         self.worker = threading.Thread(target=self.run_job, args=(opts,), daemon=True)
@@ -872,8 +691,6 @@ class App:
         self.q.put(("done", None))
 
     def finish_ui(self):
-        self.btn_go.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
         self.save_config()
 
     def on_close(self):
@@ -1291,22 +1108,19 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     # Argumen dari console: folder mengisi folder sumber, file gambar mengisi
-    # folder sumber sekaligus jadi contoh di panel pratinjau.
+    # folder sumber. (Tidak otomatis memuat contoh pratinjau — pengguna
+    # menyeret gambar sendiri ke panel.)
     preset = None
-    sample = None
     for arg in argv:
         if os.path.isdir(arg):
             preset = os.path.abspath(arg)
             break
         if os.path.isfile(arg) and arg.lower().endswith(EXTS):
             preset = os.path.dirname(os.path.abspath(arg))
-            sample = os.path.abspath(arg)
             break
 
     root = tk.Tk()
     app = App(root, preset)
-    if sample:
-        app.preview_source(sample)
     root.mainloop()
     return 0
 

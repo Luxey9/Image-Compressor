@@ -51,7 +51,7 @@ def main():
 
     print(f"STATUS      : {app.var_status.get()}")
     print(f"JUMLAH      : {app.var_count.get()}")
-    log = app.txt.get("1.0", "end")
+    log = app.ui.txt.get("1.0", "end")
     print(f"LOG dibatalkan : {'ya' if 'Dibatalkan' in log else 'TIDAK'}")
     made = sorted(os.listdir(out)) if os.path.isdir(out) else []
     tmps = [f for f in made if f.startswith(".~ic-")]

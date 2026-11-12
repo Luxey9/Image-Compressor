@@ -41,7 +41,7 @@ def main():
     app.var_quality.set(85)
     pump(root, 1.0)
     print(f"QUALITY     : {app.var_quality.get()}  jobs={app.var_jobs.get()}  "
-          f"({app.lbl_jobs.cget('text')})")
+          f"({app.ui.lbl_jobs.cget('text')})")
 
     biggest = max(ic.iter_sources(src, True), key=os.path.getsize)
     print(f"CONTOH      : {os.path.basename(biggest)}")
@@ -51,14 +51,14 @@ def main():
     while time.time() - t0 < 30:
         root.update()
         time.sleep(0.05)
-        if app.ph_before is not None and app.ph_after is not None:
+        if app.ui.compare._ph_b is not None and app.ui.compare._ph_a is not None:
             break
-    print(f"PREV info   : {app.var_prev_info.get()}")
-    print(f"PREV sumber : {app.var_prev_b.get()}")
-    print(f"PREV hasil  : {app.var_prev_a.get()}")
+    print(f"PREV info   : {app.ui.lbl_prev.cget('text')}")
+    print(f"PREV sumber : {app.ui.chip_b._text}")
+    print(f"PREV hasil  : {app.ui.chip_a._text}")
     print(f"PREV gambar : before={'ada' if app.ph_before else 'TIDAK ADA'} "
           f"after={'ada' if app.ph_after else 'TIDAK ADA'}")
-    ok_prev = app.ph_before is not None and app.ph_after is not None
+    ok_prev = app.ui.compare._ph_b is not None and app.ui.compare._ph_a is not None
 
     # geser kualitas -> pratinjau harus dihitung ulang
     app.var_quality.set(45)
@@ -67,10 +67,10 @@ def main():
     while time.time() - t0 < 30:
         root.update()
         time.sleep(0.05)
-        if "45" not in app.var_prev_a.get() and app.var_prev_a.get() and not app.prev_busy:
-            if "Menghitung" not in app.var_prev_info.get():
+        if "45" not in app.ui.chip_a._text and app.ui.chip_a._text and not app.prev_busy:
+            if "Menghitung" not in app.ui.lbl_prev.cget("text"):
                 break
-    print(f"PREV q45    : {app.var_prev_a.get()}")
+    print(f"PREV q45    : {app.ui.chip_a._text}")
 
     app.var_quality.set(85)
     pump(root, 3)
@@ -85,7 +85,7 @@ def main():
             break
     pump(root, 2.0)
 
-    log = app.txt.get("1.0", "end")
+    log = app.ui.txt.get("1.0", "end")
     print("-" * 72)
     print(log.strip())
     print("-" * 72)
