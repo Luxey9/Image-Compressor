@@ -97,34 +97,121 @@ Build pertama 5 sampai 9 menit. Log lengkap ada di `build_log.txt`.
 
 ## Command line (tanpa GUI)
 
+GUI cukup untuk kerja manual. Untuk banyak folder, otomatisasi, atau tugas terjadwal,
+pakai mode headless.
+
 ```bat
 ImageCompressor.exe --cli "D:\foto"
-ImageCompressor.exe --cli "D:\foto" --format WEBP --width 800 --quality 70 --out "D:\foto-web"
-ImageCompressor.exe --cli "D:\foto\IMG_0001.jpg" "D:\foto\IMG_0002.jpg" --out "D:\pilih"
-ImageCompressor.exe --cli "D:\foto" --in-place --format WEBP
-ImageCompressor.exe --help
 ```
+
+Tanpa `--cli`, exe hanya membuka GUI:
+
+```bat
+ImageCompressor.exe                       :: buka GUI kosong
+ImageCompressor.exe "D:\foto"             :: GUI dengan folder sumber terisi
+```
+
+### Perintah yang paling sering dipakai
+
+```bat
+:: kompres satu folder, hasil di "foto_compressed" sebelah folder asalnya
+ImageCompressor.exe --cli "D:\foto"
+
+:: banyak folder sekaligus, tiap folder dapat folder hasilnya sendiri
+ImageCompressor.exe --cli "D:\foto-a" "D:\foto-b" "D:\foto-c"
+
+:: banyak folder, semuanya dikumpulkan ke satu folder tujuan
+ImageCompressor.exe --cli "D:\foto-a" "D:\foto-b" --out "D:\hasil"
+
+:: file tertentu saja, boleh dari folder berbeda
+ImageCompressor.exe --cli "D:\a\1.jpg" "D:\b\2.png" --out "D:\pilih"
+
+:: konversi ke WebP dan timpa di tempat
+ImageCompressor.exe --cli "D:\foto" --format WEBP --in-place
+```
+
+### Semua opsi
 
 | Opsi | Default | Keterangan |
 |---|---|---|
-| `--cli` | wajib | Mode tanpa GUI, dipakai untuk otomatisasi |
-| `--out DIR` | `<folder>_compressed` | Folder tujuan |
+| `--cli` | wajib | Mode headless, tanpa jendela GUI |
+| `--out DIR`, `-o DIR` | `<folder>_compressed` | Folder tujuan |
 | `--in-place` | nonaktif | Timpa di tempat, nama file ikut format keluaran |
-| `--width N` | 1920 | Lebar maksimal px. `0` berarti tanpa resize |
-| `--quality N` | 85 | Kualitas JPEG/WebP |
-| `--format FMT` | JPEG | `JPEG` / `WEBP` / `PNG` |
-| `--jobs N` | otomatis | Jumlah worker paralel. `1` berarti berurutan |
+| `--width N`, `-w N` | `1920` | Lebar maksimal px. `0` berarti tanpa resize |
+| `--quality N`, `-q N` | `85` | Kualitas JPEG/WebP, 1 sampai 100 |
+| `--format FMT` | `JPEG` | `JPEG`, `WEBP`, atau `PNG` |
+| `--jobs N`, `-j N` | otomatis | Jumlah worker paralel. `1` berarti berurutan |
 | `--no-recursive` | nonaktif | Jangan telusuri subfolder |
-| `--keep-bigger` | nonaktif | Tetap tulis hasil walau tidak lebih kecil |
+| `--keep-bigger` | nonaktif | Tetap tulis hasil walau ukurannya tidak lebih kecil |
 | `--delete-orig` | nonaktif | Hapus file asli setelah konversi format |
+| `-h`, `--help` | | Tampilkan bantuan |
 
-Folder tujuan yang sama dipakai untuk file maupun folder. Beberapa file dari folder
-berbeda akan dikumpulkan datar ke `--out`, sementara nama file dipertahankan.
+### Nama folder hasil
 
-Tanpa `--cli`, `ImageCompressor.exe "D:\foto"` hanya membuka GUI dengan folder
-sumber terisi.
+Kalau `--out` tidak diberikan, tiap folder sumber menghasilkan folder baru bernama
+`<nama folder>_compressed`, ditaruh **di sebelah** folder asalnya, bukan di dalamnya.
+
+| Folder sumber | Folder hasil |
+|---|---|
+| `D:\Foto Liburan` | `D:\Foto Liburan_compressed` |
+| `D:\foto-kecil` | `D:\foto-kecil_compressed` |
+| `D:\proyek\2026\raw` | `D:\proyek\2026\raw_compressed` |
+
+Struktur subfolder di dalamnya tetap dipelihara:
+
+```
+foto-b\b1.jpg            -> foto-b_compressed\b1.webp
+foto-b\sub\b2-sub.jpg    -> foto-b_compressed\sub\b2-sub.webp
+```
+
+Kalau `--out` diberikan, nama folder sumber diabaikan dan semua isinya dikumpulkan ke
+folder itu. Karena semuanya dituang ke satu tempat, file dengan nama sama dari folder
+berbeda akan saling menimpa. Pakai mode tanpa `--out` kalau nama file di folder-folder
+tersebut mirip.
+
+### Banyak folder sekaligus
+
+Jumlah folder tidak dibatasi, dan folder boleh dicampur dengan file dalam satu perintah:
+
+```bat
+ImageCompressor.exe --cli "D:\a" "D:\b" "D:\c" --out "D:\hasil" --format WEBP --width 1280
+```
+
+Kalau foldernya berpola, biarkan shell yang mengumpulkan:
+
+```bat
+:: CMD, setiap subfolder di D:\proyek jadi satu pekerjaan terpisah
+for /D %d in ("D:\proyek\*") do ImageCompressor.exe --cli "%~fd" --format WEBP
+```
+
+```powershell
+# PowerShell, folder dijalankan paralel sehingga jauh lebih cepat
+Get-ChildItem "D:\proyek" -Directory | ForEach-Object {
+  Start-Process -NoNewWindow -Wait "ImageCompressor.exe" -ArgumentList @(
+    "--cli", "`"$($_.FullName)`"",
+    "--out", "`"$($_.FullName)-web`"",
+    "--format", "WEBP", "--width", "1280"
+  )
+}
+```
+
+### Format HEIC dari iPhone
+
+HEIC dibaca langsung, tidak perlu dikonversi dulu:
+
+```bat
+ImageCompressor.exe --cli "D:\iPhone" --format JPEG --quality 90
+```
 
 ### Contoh hasil nyata
+
+```
+7 gambar di 3 folder
+Selesai dalam 1.6s  |  OK 7  |  dilewati 0  |  gagal 0
+Kecepatan     : 17.6 MB/s
+Total ukuran  : 27.8 MB -> 480.7 KB
+Ruang dihemat : 98.3%
+```
 
 ```
 60 gambar (648 MB) menjadi 12.3 MB dalam 14.5 s, 44.8 MB/s, hemat 98.1%
@@ -145,6 +232,16 @@ tidak ada akselerasi GPU:
 
 Jumlah worker default sama dengan jumlah core, dibatasi RAM yang tersedia (sekitar
 300 MB per worker). Atur manual dengan `--jobs`, atau kolom *Worker paralel* di GUI.
+
+### Dipanggil dari aplikasi lain
+
+Exit code `0` berarti semua file berhasil, selain itu ada yang gagal. Cocok untuk
+dipanggil dari skrip, Task Scheduler, atau build pipeline:
+
+```bat
+ImageCompressor.exe --cli "D:\hasil-export" --format WEBP --jobs 8
+if errorlevel 1 echo ada yang gagal
+```
 
 ---
 
