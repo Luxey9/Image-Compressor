@@ -1,9 +1,0 @@
-Bersihkan repo: hapus semua file tes, hilangkan karakter non-ASCII
-
-- hapus seluruh file tes (test_core, test_stop, test_v132, test_v133, test_v134,
-  test_v135, test_v136, test_v136b). Riwayatnya masih ada di git kalau perlu.
-- ganti semua em dash dan en dash pada string UI, komentar, dan docstring
-- ganti karakter ellipsis, tanda kali, dan panah dengan padanan ASCII
-- pemisah log dan status kini memakai pipa
-- README ditulis ulang tanpa em dash, ukuran turun dari 197 ke 174 baris
-- repo kini hanya berisi file penting, total karakter non-ASCII nol
