@@ -1,4 +1,4 @@
-"""Toolkit UI kecil untuk Image Compressor — tema gelap/terang ala Fluent.
+"""Toolkit UI kecil untuk Image Compressor: tema gelap/terang ala Fluent.
 
 Semua widget digambar sendiri di Canvas karena Tk tidak punya border-radius.
 Setiap widget mendaftar ke registry supaya ganti tema cukup memanggil set_theme().

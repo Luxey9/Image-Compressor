@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Image Compressor — kompres & resize massal untuk aset web.
+"""Image Compressor: kompres & resize massal untuk aset web.
 
 GUI tkinter. Reuse logika compress_gallery.py (Lab AP):
 EXIF transpose, resize LANCZOS, flatten transparansi, save optimize.
@@ -40,9 +40,9 @@ EXTS = BASE_EXTS + HEIC_EXTS
 
 FMT_EXT = {"JPEG": ".jpg", "WEBP": ".webp", "PNG": ".png"}
 FMT_LABEL = {
-    "JPEG": "JPEG (.jpg) — paling kompatibel, paling kecil",
-    "WEBP": "WebP (.webp) — paling kecil + dukung transparansi",
-    "PNG": "PNG (.png) — lossless, untuk grafik/transparansi",
+    "JPEG": "JPEG (.jpg): paling kompatibel, paling kecil",
+    "WEBP": "WebP (.webp): paling kecil + dukung transparansi",
+    "PNG": "PNG (.png): lossless, untuk grafik dan transparansi",
 }
 LABEL_FMT = {v: k for k, v in FMT_LABEL.items()}
 
@@ -145,7 +145,7 @@ def compress_one(src: str, tmp: str, box: int, quality: int, fmt: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Eksekusi batch — banyak file sekaligus (thread pool; Pillow lepas GIL
+# Eksekusi batch: banyak file sekaligus (thread pool; Pillow lepas GIL
 # waktu encode/decode, jadi paralel di sini nyata, bukan cuma antre)
 # --------------------------------------------------------------------------- #
 
@@ -194,7 +194,7 @@ def cpu_default() -> int:
 
 
 def make_tmp(dst_dir: str) -> str:
-    """Nama file temp unik — aman walau banyak worker menulis bersamaan."""
+    """Nama file temp unik, aman walau banyak worker menulis bersamaan."""
     return os.path.join(dst_dir, f".~ic-{uuid.uuid4().hex[:10]}.tmp")
 
 
@@ -226,7 +226,7 @@ def compress_task(t: dict) -> dict:
                 "reason": "hasil tidak lebih kecil",
             }
 
-        # folder bersarang baru dibuat di sini — file yang di-SKIP tidak
+        # folder bersarang baru dibuat di sini: file yang di-SKIP tidak
         # meninggalkan folder kosong di output
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         os.replace(tmp, dst)
@@ -262,7 +262,7 @@ def run_tasks(tasks: list[dict], jobs: int = 0, cancel=None):
     """Jalankan semua task, hasilnya di-`yield` begitu selesai (urut apa saja).
 
     `cancel` = threading.Event (opsional). Begitu diset, hasil baru berhenti
-    di-`yield` dan task yang belum jalan dibatalkan — file yang sedang
+    di-`yield` dan task yang belum jalan dibatalkan: file yang sedang
     diproses tetap diselesaikan supaya tidak ada file setengah jadi.
     """
     jobs = int(jobs) or cpu_default()
@@ -513,7 +513,7 @@ class App:
             self.schedule_preview(250)
             return
         self.prev_busy = True
-        self.var_prev_info.set("Menghitung pratinjau…")
+        self.var_prev_info.set("Menghitung pratinjau...")
         o = {
             "src": self.prev_path,
             "box": int(float(self.var_width.get() or 0)),
@@ -719,7 +719,7 @@ class App:
 
     def stop(self):
         self.cancel.set()
-        self.var_status.set("Menghentikan…")
+        self.var_status.set("Menghentikan...")
 
     def run_job(self, o: dict):
         files_mode = o.get("files")
@@ -789,19 +789,19 @@ class App:
         cancelled = self.cancel.is_set()
         if cancelled:
             drop_leftover_tmp([o["out_dir"]])
-            self.log("[!] Dibatalkan — file yang sudah selesai tetap tersimpan.")
+            self.log("[!] Dibatalkan. File yang sudah selesai tetap tersimpan.")
 
         self.q.put(("progress", (done, total, None)))
         dt = time.time() - t0
         self.log("-" * 72)
-        self.log(f"Selesai dalam {dt:.1f}s  ·  OK {ok}  ·  dilewati {skip}  ·  gagal {err}")
+        self.log(f"Selesai dalam {dt:.1f}s  |  OK {ok}  |  dilewati {skip}  |  gagal {err}")
         if sum_before:
             self.log(f"Kecepatan     : {sum_before / 1048576 / max(dt, 1e-6):.1f} MB/s")
         if ok:
             self.log(f"Total ukuran  : {human(sum_before)} -> {human(sum_after)}")
             if sum_before:
                 self.log(f"Ruang dihemat : {(sum_before - sum_after) / sum_before * 100:.1f}%")
-        self.q.put(("status", ("Dihentikan — " if cancelled else "Selesai — ")
+        self.q.put(("status", ("Dihentikan: " if cancelled else "Selesai: ")
                     + f"{ok} file diproses."))
         if files_mode:
             self.last_out_dir = (os.path.dirname(files[0]) if o["in_place"]
@@ -834,7 +834,7 @@ class App:
 
 
 # --------------------------------------------------------------------------- #
-# Headless mode — drag & drop folder ke .exe, atau --cli dari terminal
+# Headless mode: drag & drop folder ke .exe, atau --cli dari terminal
 # --------------------------------------------------------------------------- #
 
 CLI_DEFAULTS = {
@@ -895,7 +895,7 @@ def launched_from_shell(argv: list[str]) -> bool:
     """Apakah proses ini dijalankan dari console (cmd/PowerShell/terminal)?
 
     Exe windowed (`--windows-console-mode=disable`) selalu punya
-    `sys.stdout is None`, bahkan waktu dijalankan dari cmd — jadi stdout
+    `sys.stdout is None`, bahkan waktu dijalankan dari cmd: jadi stdout
     sendirian tidak cukup. Cek dua hal:
       1. proses ini punya console window sendiri, atau
       2. ada console shell (cmd/pwsh/bash/wt) di rantai proses induk.
@@ -963,7 +963,7 @@ def launched_from_shell(argv: list[str]) -> bool:
             cur = parent
         return False
     except Exception:
-        # apa pun yang gagal: anggap drag & drop (mode headless) — lebih baik
+        # apa pun yang gagal: anggap drag & drop (mode headless): lebih baik
         # memproses file daripada membuka GUI tanpa diminta
         return False
 
@@ -985,7 +985,7 @@ def _split_targets(targets: list[str]) -> tuple[list[str], list[str], list[str]]
 
 
 def run_headless(targets, o: dict, interactive: bool | None = None) -> int:
-    """Proses folder dan/atau file langsung — mode drag & drop maupun --cli.
+    """Proses folder dan/atau file langsung: mode drag & drop maupun --cli.
 
     `targets` boleh satu string atau daftar. Folder diproses seperti biasa
     (hasil ke `<folder>_compressed`), file langsung diproses satu-satu dengan
@@ -1071,7 +1071,7 @@ def run_headless(targets, o: dict, interactive: bool | None = None) -> int:
     out_dirs = list(dict.fromkeys(out_dirs))
     jobs = int(o.get("jobs") or 0) or cpu_default()
 
-    say(f"{APP_NAME} v{APP_VER}  ·  headless")
+    say(f"{APP_NAME} v{APP_VER}  |  headless")
     if dirs and imgs:
         say(f"Target        : {len(dirs)} folder + {len(imgs)} file")
     elif dirs:
@@ -1113,7 +1113,7 @@ def run_headless(targets, o: dict, interactive: bool | None = None) -> int:
     dur = time.perf_counter() - t0
 
     say("-" * 72)
-    say(f"Selesai dalam {dur:.1f}s  ·  OK {ok}  ·  dilewati {skip}  ·  gagal {err}")
+    say(f"Selesai dalam {dur:.1f}s  |  OK {ok}  |  dilewati {skip}  |  gagal {err}")
     if sum_before:
         say(f"Kecepatan     : {sum_before / 1048576 / max(dur, 1e-6):.1f} MB/s")
     if ok:
@@ -1126,12 +1126,12 @@ def run_headless(targets, o: dict, interactive: bool | None = None) -> int:
         if ok and sum_before:
             saved = (f"\nTotal ukuran: {human(sum_before)} -> {human(sum_after)} "
                      f"(hemat {(sum_before - sum_after) / sum_before * 100:.1f}%)")
-        body = (f"{ok} berhasil  ·  {skip} dilewati  ·  {err} gagal  "
+        body = (f"{ok} berhasil  |  {skip} dilewati  |  {err} gagal  "
                 f"(dari {len(tasks)} file){saved}\n\nHasil ada di:\n"
                 + "\n".join(out_dirs[:3]))
         if failures:
             body += "\n\nGagal:\n" + "\n".join(failures[:5])
-        popup(f"{APP_NAME} — selesai", body)
+        popup(f"{APP_NAME}: selesai", body)
         for od in out_dirs[:2]:
             try:
                 os.startfile(od)  # noqa: S606
@@ -1202,7 +1202,7 @@ def main(argv: list[str] | None = None) -> int:
     if any(a in ("-h", "--help") for a in argv):
         say(USAGE)
         if sys.stdout is None:
-            popup(f"{APP_NAME} — bantuan", USAGE)
+            popup(f"{APP_NAME}: bantuan", USAGE)
         return 0
     if any(a in ("-V", "--version") for a in argv):
         say(f"{APP_NAME} v{APP_VER}")
@@ -1222,7 +1222,7 @@ def main(argv: list[str] | None = None) -> int:
         if not opts["targets"]:
             say(USAGE)
             if not from_shell:
-                popup(f"{APP_NAME} — bantuan", USAGE)
+                popup(f"{APP_NAME}: bantuan", USAGE)
             return 2
         return run_headless(opts["targets"], opts, interactive=not from_shell)
 
@@ -1234,7 +1234,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     # Argumen dari console: folder mengisi folder sumber, file gambar mengisi
-    # folder sumber. (Tidak otomatis memuat contoh pratinjau — pengguna
+    # folder sumber. (Tidak otomatis memuat contoh pratinjau: pengguna
     # menyeret gambar sendiri ke panel.)
     preset = None
     for arg in argv:

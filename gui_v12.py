@@ -1,4 +1,4 @@
-"""GUI v1.3.6 — tema cerah, panel pratinjau sebelum-sesudah, drag & drop.
+"""GUI v1.3.7: tema cerah, panel pratinjau sebelum-sesudah, drag & drop.
 
 Layout:
   [+------------------------------------+-----------------------+
@@ -46,7 +46,7 @@ def _ico_path() -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# Drag & drop asli Windows (WM_DROPFILES) — tanpa dependensi tambahan
+# Drag & drop asli Windows (WM_DROPFILES): tanpa dependensi tambahan
 # --------------------------------------------------------------------------- #
 
 
@@ -430,7 +430,7 @@ class ComparePanel(tk.Canvas):
 
         box = (left, top, gx + gw / 2, gy + gh / 2)
         if box[2] < 0 or box[0] > w or box[3] < 0 or box[1] > h:
-            # tergeser keluar kanvas sepenuhnya — biar tidak bingung, reset
+            # tergeser keluar kanvas sepenuhnya: biar tidak bingung, reset
             self.reset_zoom()
             return
 
@@ -480,11 +480,11 @@ class ComparePanel(tk.Canvas):
         # keterangan arah: geser ke kiri = lebih banyak 'sebelum' terlihat
         if self._ph_a is not None and self._img_b is not None:
             self.create_text(w / 2, h - 34,
-                             text=f"{self._split * 100:.0f}% sebelum · "
+                             text=f"{self._split * 100:.0f}% sebelum, "
                                   f"{(1 - self._split) * 100:.0f}% sesudah",
                              fill=p["text_dim"], font=ui.font(8))
 
-        # ---- indikator zoom + tombol − / + / Fit (kanan bawah) ----
+        # ---- indikator zoom + tombol - / + / Fit (kanan bawah) ----
         ztxt = f"{self._zoom * 100:.0f}%"
         bh_ = 24
         bx1 = w - 8
@@ -496,7 +496,7 @@ class ComparePanel(tk.Canvas):
         y0 = h - bh_ - 8
         for x0, x1, label, tag in (
             (x_val, x_minus, ztxt, "zv"),
-            (x_minus, x_plus, "−", "zout"),
+            (x_minus, x_plus, "-", "zout"),
             (x_plus, x_fit, "+", "zin"),
             (x_fit, bx1, "Fit", "zfit"),
         ):
@@ -732,9 +732,9 @@ class GUI:
         chips = tk.Frame(card.body, bg=p["panel"])
         chips.grid(row=2, column=0, sticky="ew", padx=14, pady=(10, 12))
         chips.columnconfigure(2, weight=1)
-        self.chip_b = ui.Badge(chips, "Sebelum —", color_key="text_dim")
+        self.chip_b = ui.Badge(chips, "Sebelum", color_key="text_dim")
         self.chip_b.grid(row=0, column=0, sticky="w")
-        self.chip_a = ui.Badge(chips, "Sesudah —", color_key="ok")
+        self.chip_a = ui.Badge(chips, "Sesudah", color_key="ok")
         self.chip_a.grid(row=0, column=1, sticky="w", padx=(6, 0))
         self.chip_dims = ui.Label(chips, "", size=9, color=p["text_dim"], bg=p["panel"])
         self.chip_dims.grid(row=0, column=2, sticky="e")
@@ -849,7 +849,7 @@ class GUI:
         card.body.columnconfigure(0, weight=1)   # isi card melar mengikuti lebar
         self.side_holder = holder
 
-        # ---- 1 · Sumber & tujuan ----
+        # ---- 1. Sumber & tujuan ----
         ui.Section(card.body, "1", "Folder").grid(row=0, column=0, sticky="ew",
                                                   padx=14, pady=(14, 6))
         ui.Label(card.body, "Sumber", size=9, color=p["text_dim"],
@@ -906,7 +906,7 @@ class GUI:
 
         ui.Divider(card.body).grid(row=9, column=0, sticky="ew", padx=14, pady=(14, 0))
 
-        # ---- 2 · Kualitas ----
+        # ---- 2. Kualitas ----
         ui.Section(card.body, "2", "Kualitas").grid(row=10, column=0, sticky="ew",
                                                     padx=14, pady=(12, 6))
         qrow = tk.Frame(card.body, bg=p["panel"])
@@ -951,7 +951,7 @@ class GUI:
 
         ui.Divider(card.body).grid(row=19, column=0, sticky="ew", padx=14, pady=(14, 0))
 
-        # ---- 3 · Opsi ----
+        # ---- 3. Opsi ----
         ui.Section(card.body, "3", "Opsi").grid(row=20, column=0, sticky="ew",
                                                 padx=14, pady=(12, 4))
         self.sw_skip = ui.Switch(card.body, self.core.var_skip_bigger,
@@ -988,7 +988,7 @@ class GUI:
         c.var_mode.trace_add("write", lambda *_: self.on_mode())
 
         # Drag & drop: pasang ke root. Kalau gagal, coba widget anak (canvas
-        # pratinjau) — di beberapa build Tk/Nuitka root di-subclass ulang oleh
+        # pratinjau): di beberapa build Tk/Nuitka root di-subclass ulang oleh
         # Tk sendiri sehingga hook-nya hilang. Kegagalan TIDAK boleh senyap.
         ok = enable_drop(self.root, self.on_drop)
         if not ok:
@@ -1003,7 +1003,7 @@ class GUI:
         if not ok:
             try:
                 self.set_status(
-                    "Catatan: drag & drop tidak aktif di build ini — "
+                    "Catatan: drag & drop tidak aktif di build ini. "
                     "pakai tombol 'Pilih Folder'."
                 )
             except Exception:
@@ -1030,7 +1030,7 @@ class GUI:
     def _on_jobs(self):
         n = int(float(self.core.var_jobs.get() or 0))
         if n == 0:
-            self.lbl_jobs.configure(text=f"otomatis · {self.core.cpu_default()}")
+            self.lbl_jobs.configure(text=f"otomatis, {self.core.cpu_default()}")
         elif n == 1:
             self.lbl_jobs.configure(text="berurutan")
         else:
@@ -1044,7 +1044,7 @@ class GUI:
 
     def on_mode(self):
         own = self.core.var_mode.get() == "own"
-        # Entry tujuan: abu-abu saat mode "Timpa di tempat" — tapi tombol folder
+        # Entry tujuan: abu-abu saat mode "Timpa di tempat": tapi tombol folder
         # tetap AKTIF supaya user bisa pakai jalur pintas memilih folder lain
         # (pick_out otomatis memindahkan mode).
         self.e_out.configure(state="normal" if own else "disabled")
@@ -1081,7 +1081,7 @@ class GUI:
                 total += os.path.getsize(f)
             except Exception:
                 pass
-        self.lbl_files.configure(text=f"{n} file · {self.core.human(total)}")
+        self.lbl_files.configure(text=f"{n} file, {self.core.human(total)}")
         self.btn_clear_files.set_disabled(False)
 
     def pick_out(self):
@@ -1154,9 +1154,9 @@ class GUI:
             parts.append(f"{len(bad)} dilewati")
         pesan = ", ".join(parts) if parts else "tidak ada yang bisa dipakai"
         if n_files:
-            self.set_status(f"Dilepas: {pesan} · {n_files} gambar siap dikompres.")
+            self.set_status(f"Dilepas: {pesan}, {n_files} gambar siap dikompres.")
         elif folders:
-            self.set_status(f"Dilepas: {pesan} · folder sumber belum ada gambarnya.")
+            self.set_status(f"Dilepas: {pesan}, folder sumber belum ada gambarnya.")
         else:
             self.set_status(f"Dilepas: {pesan}.")
 
@@ -1226,7 +1226,7 @@ class GUI:
         self.chip_a.set(f"Sesudah  {self.core.human(p['new'])}  "
                         f"({self.core.pct_text(p['orig'], p['new'])})", "ok")
         self.chip_dims.configure(
-            text=f"{p['bdim'][0]}×{p['bdim'][1]}  →  {p['adim'][0]}×{p['adim'][1]}"
+            text=f"{p['bdim'][0]}x{p['bdim'][1]}  ->  {p['adim'][0]}x{p['adim'][1]}"
         )
 
     def preview_failed(self, msg: str) -> None:
@@ -1267,7 +1267,7 @@ class GUI:
                     self.set_progress(done, total)
                     if name:
                         pct = 0 if not total else done * 100.0 / total
-                        self.set_status(f"{pct:.0f}%  ·  {name}")
+                        self.set_status(f"{pct:.0f}%  |  {name}")
                 elif kind == "status":
                     self.set_status(payload)
                 elif kind == "prev":
